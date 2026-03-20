@@ -406,14 +406,24 @@ run_murfi() {
         return 0
     fi
 
-    # Redirect apptainer/MURFI output away from terminal.
-    # MURFI's Qt GUI writes to /dev/tty, bypassing shell stdout redirect.
-    # Closing fd 0 and using setsid detaches from controlling terminal.
+    # Suppress Qt/GTK warnings that flood the terminal:
+    #   SESSION_MANAGER  → "Could not connect to session manager" (D-Bus)
+    #   NO_AT_BRIDGE     → "Couldn't connect to accessibility bus" (AT-SPI)
+    #   QT_QPA_PLATFORM  → Force X11 backend (prevents Wayland/fallback issues)
+    #   QT_LOGGING_RULES → Suppress Qt debug/warning output
+    unset SESSION_MANAGER
+    export NO_AT_BRIDGE=1
+
+    # setsid + </dev/null detaches MURFI from the controlling terminal.
+    # MURFI's Qt GUI writes directly to /dev/tty, bypassing shell redirects.
     setsid apptainer exec \
         --nv \
         --cleanenv \
         --env DISPLAY="${DISPLAY}" \
         --env XDG_RUNTIME_DIR="/tmp/runtime-$(id -u)" \
+        --env QT_QPA_PLATFORM=xcb \
+        --env NO_AT_BRIDGE=1 \
+        --env QT_LOGGING_RULES="*.debug=false;*.warning=false" \
         --env MURFI_SUBJECTS_DIR="${MURFI_SUBJECTS_DIR}" \
         --env MURFI_SUBJECT_NAME="${MURFI_SUBJECT_NAME}" \
         --bind "${SUBJECTS_DIR}:${SUBJECTS_DIR}" \

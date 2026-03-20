@@ -152,14 +152,25 @@ ENTRYPOINT ["murfi"]
 ### How the session runner launches MURFI
 
 MURFI is launched inside the Apptainer container with GPU passthrough and the
-subject data directory bind-mounted:
+subject data directory bind-mounted. Several environment variables suppress
+Qt/GTK warnings that would otherwise flood the terminal:
 
 ```bash
+# Host-side: suppress D-Bus and accessibility warnings before launching
+unset SESSION_MANAGER   # Prevents "Could not connect to session manager"
+export NO_AT_BRIDGE=1   # Prevents "Couldn't connect to accessibility bus"
+
+# Ensure Qt runtime directory exists
+mkdir -p -m 0700 "/tmp/runtime-$(id -u)"
+
 setsid apptainer exec \
     --nv \                                          # NVIDIA GPU passthrough
     --cleanenv \                                    # Clean environment
     --env DISPLAY="${DISPLAY}" \                     # X11 display
     --env XDG_RUNTIME_DIR="/tmp/runtime-$(id -u)" \ # Qt runtime dir
+    --env QT_QPA_PLATFORM=xcb \                     # Force X11 backend (not Wayland)
+    --env NO_AT_BRIDGE=1 \                          # Suppress AT-SPI inside container
+    --env QT_LOGGING_RULES="*.debug=false;*.warning=false" \  # Suppress Qt warnings
     --env MURFI_SUBJECTS_DIR="${SUBJECTS_DIR}/" \    # Where subjects live
     --env MURFI_SUBJECT_NAME="${SUBJ}" \             # Current subject
     --bind "${SUBJECTS_DIR}:${SUBJECTS_DIR}" \       # Mount subjects into container
@@ -176,6 +187,38 @@ Key details:
 - The XML file path must be an absolute path inside the bind mount
 - MURFI's environment variables (`MURFI_SUBJECTS_DIR`, `MURFI_SUBJECT_NAME`) tell it
   where to find the subject directory, images, masks, and transforms
+
+### Suppressing Qt/GTK warnings
+
+MURFI uses a Qt GUI that produces several harmless but noisy warnings when run
+inside an Apptainer container on a GNOME desktop. Without suppression, the
+terminal fills with messages like:
+
+```
+(murfi:1234): Gtk-WARNING **: cannot open display
+Gdk-Message: Unable to connect to the accessibility bus
+Qt: Session management error: Could not open network socket
+```
+
+The environment variables above suppress these. Here is what each one does:
+
+| Variable | Warning it suppresses | Where to set |
+|---|---|---|
+| `unset SESSION_MANAGER` | "Could not open network socket" / D-Bus session errors | Host shell, before `apptainer exec` |
+| `NO_AT_BRIDGE=1` | "Couldn't connect to accessibility bus" (AT-SPI / dbus) | Both host (`export`) and container (`--env`) |
+| `QT_QPA_PLATFORM=xcb` | Qt platform plugin errors, Wayland fallback warnings | Container (`--env`) |
+| `QT_LOGGING_RULES=*.debug=false;*.warning=false` | All remaining Qt debug/warning messages | Container (`--env`) |
+| `XDG_RUNTIME_DIR=/tmp/runtime-$(id -u)` | "XDG_RUNTIME_DIR not set" / Qt socket errors | Container (`--env`), must `mkdir -p` first |
+
+The `--cleanenv` flag is essential: without it, the host's full environment leaks
+into the container, causing additional conflicts (wrong library paths, locale errors,
+D-Bus socket mismatches). With `--cleanenv`, only the explicitly passed `--env`
+variables are visible inside the container.
+
+Note: even with all suppressions, MURFI's Qt GUI may still write some output
+directly to `/dev/tty` (the controlling terminal). The `setsid` and `</dev/null`
+combination detaches MURFI from the terminal to prevent this from interfering
+with the operator's `read` prompt.
 
 ### Group membership
 

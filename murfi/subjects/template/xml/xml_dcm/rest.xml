@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<study name="remind">
+    <option name="softwareDir"> /opt/murfi/ </option>
+</study>
+
+
+
+<scanner>
+  <option name="imageSource">     DICOM  </option>
+  <!-- for real-->
+  <option name="inputDicomDir">   /home/young-lab/code/mindfulness-nf/murfi/dicom_input  </option>
+    
+    <!-- for simmulator
+  <option name="inputDicomDir">   tmp/murfi_input </option>
+   -->
+  <option name="tr">              1.2    </option>
+  <option name="measurements">    250    </option>
+
+  <option name="save">            true   </option>
+</scanner>
+
+<infoserver>
+  <option name="disabled"> false </option>
+  <option name="port"> 15001 </option>
+</infoserver>
+
+<!-- processing steps (every TR)-->
+<processor>
+  <!-- creats a mosaic for the GUI -->
+  <module name="mosaic">
+    <option name="disabled"> false </option>
+    <output>display</output>
+    <output>log</output>
+  </module>
+
+</processor>

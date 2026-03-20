@@ -1,0 +1,10 @@
+[project]
+name = "mindfulness-nf"
+version = "0.1.0"
+description = "Real-time fMRI neurofeedback pipeline targeting DMN/CEN for mindfulness training"
+requires-python = ">=3.12"
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.26",
+    "pynetdicom>=3.0.4",
+]

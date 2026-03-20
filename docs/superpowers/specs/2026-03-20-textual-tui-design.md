@@ -183,10 +183,12 @@ All scanner and protocol constants live in `config.py`:
 | `INFOSERVER_PORT` | `15001` | `psychopy.py` |
 | `MURFI_CONTAINER` | `/opt/murfi/apptainer-images/murfi.sif` | `murfi.py` |
 
-XML template directories:
+XML template directories (both contain all 3 XMLs; the directory determines the input source):
 
-- vSend scans: `murfi/subjects/template/xml/xml_vsend/` (`2vol.xml`, `rtdmn.xml`)
-- DICOM scans: `murfi/subjects/template/xml/xml_dcm/` (`rest.xml`)
+- vSend input: `murfi/subjects/template/xml/xml_vsend/` (`2vol.xml`, `rest.xml`, `rtdmn.xml`)
+- DICOM input: `murfi/subjects/template/xml/xml_dcm/` (`2vol.xml`, `rest.xml`, `rtdmn.xml`)
+
+`createxml.sh` copies from `xml_vsend/` by default. Resting state scans use the DICOM receiver regardless of which template directory was used; the `imageSource` setting in `rest.xml` controls input mode.
 
 ## Localizer Session
 
@@ -244,13 +246,13 @@ Preflight checks run once before Run 1 as part of session initialization (using 
 
 1. **MURFI phase**: MURFI container starts, receives volumes from scanner via vSend. Operator waits for scanner acquisition to finish, then presses `D`.
 2. **Validation**: System checks volume count against thresholds. Green advances; yellow requires second `D`; red blocks.
-3. **PsychoPy phase**: PsychoPy launches as subprocess (15 min). Ball task runs. No operator input. PsychoPy exits and writes CSV.
+3. **PsychoPy phase**: PsychoPy launches as subprocess (150 seconds / 2.5 min). Ball task runs. No operator input. PsychoPy exits and writes CSV.
 
 ### Adaptive Scale Factor
 
 The scale factor controls ball movement sensitivity during feedback runs.
 
-- **Default**: 10.0. Used for Run 2 (first feedback run). The scale factor resets to 10.0 at Run 8 (first feedback run after Transfer Post).
+- **Default**: 10.0. Used for Run 2 (first feedback run) when no prior feedback CSV exists. The scale factor does NOT reset at Run 8; it carries over from Run 6 (the last feedback run before Transfer Post).
 - **Adjustment**: After each feedback run, the system computes the mean hit rate (hits per TR) from that run's CSV. If the mean is below 3 hits per TR, the scale factor is multiplied by 1.25. If above 5 hits per TR, multiplied by 0.75. If between 3 and 5 (inclusive), the scale factor is unchanged.
 - **No clamp**: The scale factor itself is not clamped. The per-TR hit target range of 3-5 is the control mechanism.
 

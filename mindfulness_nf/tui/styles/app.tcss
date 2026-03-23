@@ -1,0 +1,112 @@
+/* Mindfulness Neurofeedback TUI Styles */
+
+/* ---- Color variables ---- */
+/* Textual uses $-prefixed design tokens from its built-in theme.
+   We define custom classes for our traffic light states. */
+
+.green-bg {
+    background: green;
+    color: white;
+}
+
+.yellow-bg {
+    background: yellow;
+    color: black;
+}
+
+.red-bg {
+    background: red;
+    color: white;
+}
+
+.green-text {
+    color: green;
+}
+
+.yellow-text {
+    color: yellow;
+}
+
+.red-text {
+    color: red;
+}
+
+/* ---- Three-zone screen layout ---- */
+/* Zone 1: Step tracker (left column) */
+/* Zone 2: Status panel (right top) */
+/* Zone 3: Log panel (right bottom) */
+
+.screen-layout {
+    layout: grid;
+    grid-size: 2 2;
+    grid-columns: 1fr 2fr;
+    grid-rows: auto 1fr;
+    padding: 1;
+}
+
+.zone-step-tracker {
+    row-span: 2;
+    border: solid $accent;
+    padding: 1;
+    height: 100%;
+}
+
+.zone-status {
+    border: solid $accent;
+    padding: 1;
+    height: auto;
+}
+
+.zone-log {
+    height: 1fr;
+}
+
+/* ---- Widget-specific styles ---- */
+
+StatusLight {
+    height: auto;
+    padding: 1 2;
+    border: solid $accent;
+}
+
+RunProgress {
+    height: auto;
+    padding: 0 1;
+    margin: 0 0 1 0;
+}
+
+LogPanel {
+    height: 1fr;
+    border: solid $accent;
+}
+
+PreflightChecklist {
+    height: auto;
+    padding: 1 2;
+    border: solid $accent;
+}
+
+RunTable {
+    height: auto;
+    border: solid $accent;
+    padding: 1;
+}
+
+/* ---- Common layout utilities ---- */
+
+.padded {
+    padding: 1 2;
+}
+
+.bordered {
+    border: solid $accent;
+}
+
+.title-bar {
+    dock: top;
+    text-style: bold;
+    background: $accent;
+    color: $text;
+    padding: 0 2;
+    height: 1;
+}

@@ -82,12 +82,23 @@ start_murfi() {
     local xml_path="$1"
     echo "Starting MURFI with ${xml_path}..."
     cd "$SCRIPT_PATH"
-    apptainer exec \
+    unset SESSION_MANAGER
+    export NO_AT_BRIDGE=1
+    mkdir -p "/tmp/runtime-$(id -u)" 2>/dev/null || true
+    setsid apptainer exec \
+        --nv \
+        --cleanenv \
+        --env DISPLAY="${DISPLAY}" \
+        --env XDG_RUNTIME_DIR="/tmp/runtime-$(id -u)" \
+        --env QT_QPA_PLATFORM=xcb \
+        --env NO_AT_BRIDGE=1 \
+        --env QT_LOGGING_RULES="*.debug=false;*.warning=false" \
         --env MURFI_SUBJECTS_DIR="${MURFI_SUBJECTS_DIR}" \
         --env MURFI_SUBJECT_NAME="${MURFI_SUBJECT_NAME}" \
         --bind "${MURFI_SUBJECTS_DIR}:${MURFI_SUBJECTS_DIR}" \
         "$CONTAINER" \
-        murfi -f "$xml_path"
+        murfi -f "$xml_path" \
+        </dev/null 2>&1
 }
 
 # --- Test levels ---
@@ -191,36 +202,197 @@ level2() {
 }
 
 level3() {
+    MURFI_PID=""
+    SERVE_PID=""
+    cleanup_level3() {
+        echo ""
+        echo "Cleaning up..."
+        [ -n "$SERVE_PID" ] && kill $SERVE_PID 2>/dev/null
+        [ -n "$MURFI_PID" ] && kill $MURFI_PID 2>/dev/null
+        wait $SERVE_PID 2>/dev/null || true
+        wait $MURFI_PID 2>/dev/null || true
+        echo "Done."
+    }
+    trap cleanup_level3 EXIT INT TERM
+
     echo ""
-    echo "=== LEVEL 3: Full Feedback Loop ==="
+    echo "=== LEVEL 3: Full Feedback Loop (automated) ==="
     echo "Tests: MURFI receives data + computes ROI activations + PsychoPy displays feedback."
+    echo "Everything runs in one terminal. Press Ctrl-C to stop early."
     echo ""
 
-    # Check masks exist (from level 2 or backup registration)
-    if [ ! -f "${TEST_SUBJECT_DIR}/mask/dmn.nii" ] || [ ! -f "${TEST_SUBJECT_DIR}/mask/cen.nii" ]; then
-        echo "No masks found. Creating from MNI templates (backup registration)..."
-        cd "$SCRIPT_PATH"
-        source feedback.sh "$TEST_SUBJECT" backup_reg_mni_masks_to_2vol
+    setup_test_subject
+
+    # --- Step 1: Ensure reference image exists (run 2-vol if needed) ---
+    if [ ! -f "${TEST_SUBJECT_DIR}/xfm/study_ref.nii" ]; then
+        echo "[Step 1/5] Creating reference image (2-volume scan)..."
+
+        # Start MURFI in background
+        mkdir -p "/tmp/runtime-$(id -u)" 2>/dev/null || true
+        setsid apptainer exec \
+            --nv --cleanenv \
+            --env DISPLAY="${DISPLAY}" \
+            --env XDG_RUNTIME_DIR="/tmp/runtime-$(id -u)" \
+            --env QT_QPA_PLATFORM=xcb \
+            --env NO_AT_BRIDGE=1 \
+            --env QT_LOGGING_RULES="*.debug=false;*.warning=false" \
+            --env MURFI_SUBJECTS_DIR="${MURFI_SUBJECTS_DIR}" \
+            --env MURFI_SUBJECT_NAME="${MURFI_SUBJECT_NAME}" \
+            --bind "${MURFI_SUBJECTS_DIR}:${MURFI_SUBJECTS_DIR}" \
+            "$CONTAINER" \
+            murfi -f "${TEST_SUBJECT_DIR}/xml/2vol.xml" \
+            </dev/null > /dev/null 2>&1 &
+        MURFI_PID=$!
+
+        # Wait for port 50000 to be listening
+        for i in $(seq 1 30); do
+            if ss -tln | grep -q ':50000 '; then break; fi
+            sleep 1
+        done
+
+        serve_volumes 2
+        sleep 2  # let MURFI finish processing
+
+        # Kill MURFI (it doesn't exit on its own — GUI stays open)
+        kill $MURFI_PID 2>/dev/null || true
+        wait $MURFI_PID 2>/dev/null || true
+        echo "  Reference image created."
+    else
+        echo "[Step 1/5] Reference image exists, skipping."
     fi
 
-    echo ""
-    echo "This requires THREE terminals:"
-    echo "  Terminal 1 (this one): runs MURFI"
-    echo "  Terminal 2: sends simulated volumes"
-    echo "  Terminal 3: runs PsychoPy"
-    echo ""
-    echo "After MURFI starts:"
-    echo "  Terminal 2: cd $PROJECT_ROOT && bash murfi/scripts/test_pipeline.sh serve 85"
-    echo "  Terminal 3: cd $PROJECT_ROOT && bash murfi/scripts/test_pipeline.sh psychopy"
-    echo ""
-    echo "Press Enter to start MURFI, or Ctrl-C to cancel."
-    read -r
+    # --- Step 2: Create masks from MNI templates ---
+    echo "[Step 2/5] Registering MNI template masks to native space..."
+    MASKS_DIR="${SCRIPT_PATH}/masks"
+    cd "${TEST_SUBJECT_DIR}"
 
-    # Adjust rtdmn.xml to 85 measurements
+    # Find the reference image
+    REF=$(ls xfm/series*_ref.nii 2>/dev/null | head -1)
+    if [ -z "$REF" ]; then
+        REF="xfm/study_ref.nii"
+    fi
+    cp "$REF" xfm/study_ref.nii 2>/dev/null || true
+
+    # Register MNI to native
+    flirt -in "${MASKS_DIR}/MNI152_T1_2mm_brain.nii" \
+          -ref "$REF" \
+          -omat xfm/mni2native.mat \
+          -out xfm/mni2native.nii \
+          -dof 12 2>/dev/null
+
+    # Apply to DMN and CEN masks
+    flirt -in "${MASKS_DIR}/DMNax_brainmaskero2.nii" \
+          -ref "$REF" \
+          -applyxfm -init xfm/mni2native.mat \
+          -interp nearestneighbour \
+          -out mask/dmn.nii -datatype short 2>/dev/null
+
+    flirt -in "${MASKS_DIR}/CENa_brainmaskero2.nii" \
+          -ref "$REF" \
+          -applyxfm -init xfm/mni2native.mat \
+          -interp nearestneighbour \
+          -out mask/cen.nii -datatype short 2>/dev/null
+
+    DMN_VOX=$(fslstats mask/dmn.nii -V | awk '{print $1}')
+    CEN_VOX=$(fslstats mask/cen.nii -V | awk '{print $1}')
+    echo "  DMN: ${DMN_VOX} voxels, CEN: ${CEN_VOX} voxels"
+
+    # --- Step 3: Adjust rtdmn.xml for 85 volumes ---
+    echo "[Step 3/5] Configuring feedback XML for 85 volumes..."
     sed -i 's/measurements">   150/measurements">    85/' \
         "${TEST_SUBJECT_DIR}/xml/rtdmn.xml" 2>/dev/null
 
-    start_murfi "${TEST_SUBJECT_DIR}/xml/rtdmn.xml"
+    # Trim design matrix to 85 elements
+    python3 -c "
+import re, sys
+p = '${TEST_SUBJECT_DIR}/xml/rtdmn.xml'
+txt = open(p).read()
+old = re.search(r'(conditionName=\"Regulation\">)\s*([\s1]+)\s*(</option>)', txt)
+if old:
+    ones = '\n        ' + '\n        '.join([' '.join(['1']*25) for _ in range(3)] + [' '.join(['1']*10)])
+    txt = txt[:old.start(2)] + ones + '\n      ' + txt[old.start(3):]
+    open(p, 'w').write(txt)
+"
+
+    # --- Step 4: Start MURFI in background, send volumes, launch PsychoPy ---
+    echo "[Step 4/5] Starting MURFI..."
+    cd "$SCRIPT_PATH"
+
+    # Log MURFI output to file instead of terminal
+    MURFI_LOG="${TEST_SUBJECT_DIR}/log/murfi_test.log"
+    mkdir -p "/tmp/runtime-$(id -u)" 2>/dev/null || true
+    setsid apptainer exec \
+        --nv --cleanenv \
+        --env DISPLAY="${DISPLAY}" \
+        --env XDG_RUNTIME_DIR="/tmp/runtime-$(id -u)" \
+        --env QT_QPA_PLATFORM=xcb \
+        --env NO_AT_BRIDGE=1 \
+        --env QT_LOGGING_RULES="*.debug=false;*.warning=false" \
+        --env MURFI_SUBJECTS_DIR="${MURFI_SUBJECTS_DIR}" \
+        --env MURFI_SUBJECT_NAME="${MURFI_SUBJECT_NAME}" \
+        --bind "${MURFI_SUBJECTS_DIR}:${MURFI_SUBJECTS_DIR}" \
+        "$CONTAINER" \
+        murfi -f "${TEST_SUBJECT_DIR}/xml/rtdmn.xml" \
+        </dev/null > "$MURFI_LOG" 2>&1 &
+    MURFI_PID=$!
+
+    # Wait for MURFI to start listening
+    echo "  Waiting for MURFI to listen on port 50000..."
+    for i in $(seq 1 30); do
+        if ss -tln | grep -q ':50000 '; then
+            echo "  MURFI ready (log: $MURFI_LOG)"
+            break
+        fi
+        sleep 1
+    done
+
+    # --- Step 5: Match real experiment order ---
+    # Real flow: MURFI listening → PsychoPy starts (shows baseline) → scanner trigger → volumes stream
+    # Test flow: MURFI listening → PsychoPy starts in background → servenii streams after baseline delay
+
+    echo "[Step 5/5] Starting PsychoPy, then simulated scanner..."
+    echo ""
+    echo "  PsychoPy will start first (like the real experiment)."
+    echo "  Fill in the dialog, then press 't' in the PsychoPy window."
+    echo "  Volumes will start streaming automatically when 't' is detected."
+    echo ""
+
+    # Clean up any old trigger file
+    TRIGGER_FILE="/tmp/psychopy_trigger"
+    rm -f "$TRIGGER_FILE"
+
+    # Launch PsychoPy in background
+    cd "${PROJECT_ROOT}/psychopy/balltask"
+    python rt-network_feedback.py &
+    PSYCHOPY_PID=$!
+
+    # Watch for trigger file written by PsychoPy when 't' is pressed
+    echo "  Waiting for 't' trigger in PsychoPy..."
+    while [ ! -f "$TRIGGER_FILE" ]; do
+        # Check if PsychoPy exited early (user pressed Escape)
+        if ! kill -0 $PSYCHOPY_PID 2>/dev/null; then
+            echo "  PsychoPy exited before trigger. Aborting."
+            return 1
+        fi
+        sleep 0.2
+    done
+    rm -f "$TRIGGER_FILE"
+
+    # Start streaming volumes
+    echo "  Trigger detected! Streaming 85 volumes..."
+    cd "${TEST_SUBJECT_DIR}"
+    apptainer exec \
+        --bind "$(pwd):$(pwd)" \
+        "$CONTAINER" \
+        "$SERVENII" img/img 1 85 1 68 1200 50000 127.0.0.1 &
+    SERVE_PID=$!
+
+    # Wait for PsychoPy to finish (it's the foreground task for the operator)
+    wait $PSYCHOPY_PID 2>/dev/null || true
+
+    # Cleanup handled by trap
+    echo ""
+    echo "Level 3 complete."
 }
 
 # --- Subcommands for Terminal 2/3 ---

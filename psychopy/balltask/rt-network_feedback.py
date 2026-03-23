@@ -90,7 +90,7 @@ expInfo = {'participant':input_participant, 'run':input_run, 'anchor': input_anc
 
 
 # Default to fake mode for safety — set to False for real scanning
-murfi_FAKE=True
+murfi_FAKE=False
 
 # Show dialogue box until all participant info has been entered
 while expInfo['feedback_on'] not in ['Feedback', 'No Feedback']:
@@ -164,7 +164,7 @@ while os.path.exists(filename + '_roi_outputs.csv'):
     warning_box.addText(f'Already have data for {expInfo["participant"]} run {expInfo["run"]}!\nClick OK to write to Run {int(expInfo["run"]) + 1} instead \
         \nTo overwrite run {expInfo["run"]}, select this option from the dropdown menu \
         \nOr, click Cancel to exit')
-    warning_box.addField(label='Choose Run #',choices = [f"Run {int(expInfo['run']) + 1}", 
+    warning_box.addField(key='run_choice', label='Choose Run #', choices=[f"Run {int(expInfo['run']) + 1}",
                                       f"Overwrite Run {int(expInfo['run'])}"])
     warning_box_data=warning_box.show()
     if not warning_box.OK:
@@ -276,7 +276,7 @@ endExpNow = False  # flag for 'escape' or other condition => quit the exp
 
 # Start Code - component code to be run before the window creation
 # Setup the Window
-win = visual.Window(size=(1080,1080), fullscr=False, screen=1, allowGUI=False, allowStencil=False,#1024, 1024
+win = visual.Window(size=(1920,1080), fullscr=True, screen=1, allowGUI=False, allowStencil=False,
     monitor='testMonitor', color=[-1,-1,-1], colorSpace='rgb',
     blendMode='avg', useFBO=True,
     )
@@ -299,7 +299,7 @@ with open(run_questions_file, 'a') as csvfile:
     stim_writer.writerow(["id", "run", 'feedback_on', "question_text", "response", "rt"])  
 
 slider_instruction = visual.TextStim(win=win, ori=0, name='text',
-        text="You'll see a few slider questions next\nPress the left and right buttons to move the slider\nAnd the top button to enter your response\nPress any button to continue", font=u'Arial',
+        text="You'll see a few slider questions next\nPress the left and right buttons to move the slider\nAnd the top button to enter your response\nPress any button to continue", font='Liberation Sans',
         pos=[0, 0.2], height=0.06, wrapWidth=1.2,
         color=u'white', colorSpace='rgb', opacity=1,
         depth=0.0)
@@ -307,7 +307,7 @@ slider_instruction = visual.TextStim(win=win, ori=0, name='text',
 
 def run_slider(question_text='Default Text', left_label='left', right_label='right'):
     slider_question = visual.TextStim(win=win, ori=0, name='text',
-        text=question_text, font=u'Arial',
+        text=question_text, font='Liberation Sans',
         pos=[0, 0.2], height=0.06, wrapWidth=1.2,
         color=u'white', colorSpace='rgb', opacity=1,
         depth=0.0)
@@ -319,7 +319,7 @@ def run_slider(question_text='Default Text', left_label='left', right_label='rig
                 granularity=1,
                 color='white',
                 fillColor='white',
-                font=u'Arial')
+                font='Liberation Sans')
 
     event.clearEvents('keyboard')
     vas.markerPos = 5
@@ -354,7 +354,7 @@ def run_slider(question_text='Default Text', left_label='left', right_label='rig
 # Initialize components for Routine "instructions"
 instructionsClock = core.Clock()
 text = visual.TextStim(win=win, ori=0, name='text',
-    text='',font=u'Arial',
+    text='',font='Liberation Sans',
     pos=[0, 0], height=0.06, wrapWidth=1.2,
     color=u'white', colorSpace='rgb', opacity=1,
     depth=0.0)
@@ -362,7 +362,7 @@ text = visual.TextStim(win=win, ori=0, name='text',
 # Initialize components for Routine "trigger"
 triggerClock = core.Clock()
 waiting_for_trigger_text = visual.TextStim(win=win, ori=0, name='waiting_for_trigger_text',
-    text=u'waiting for scanner',    font=u'Arial',
+    text=u'waiting for scanner',    font='Liberation Sans',
     pos=[0, 0], height=0.1, wrapWidth=2,
     color=u'white', colorSpace='rgb', opacity=1,
     depth=0.0)
@@ -370,14 +370,14 @@ waiting_for_trigger_text = visual.TextStim(win=win, ori=0, name='waiting_for_tri
 # Initialize components for Routine "baseline"
 baselineClock = core.Clock()
 text_2 = visual.TextStim(win=win, ori=0, name='text_2',
-    text=u'+',    font=u'Arial',
+    text=u'+',    font='Liberation Sans',
     pos=[0, 0], height=0.3, wrapWidth=None,
     color=u'white', colorSpace='rgb', opacity=1,
     depth=0.0)
 
 
 text_relax = visual.TextStim(win=win, ori=0, name='text_relax',
-    text=u'Relax',    font=u'Arial',
+    text=u'Relax',    font='Liberation Sans',
     pos=[0, -.2], height=0.07, wrapWidth=None,
     color=u'white', colorSpace='rgb', opacity=1,
     depth=0.0)
@@ -386,7 +386,7 @@ text_relax = visual.TextStim(win=win, ori=0, name='text_relax',
 feedbackClock = core.Clock()
 
 text_4 = visual.TextStim(win=win, ori=0, name='text_4',
-    text='default text',    font=u'Arial',
+    text='default text',    font='Liberation Sans',
     pos=[0, 0], height=0.1, wrapWidth=None,
     color=u'white', colorSpace='rgb', opacity=1,
     depth=-3.0)
@@ -504,7 +504,7 @@ def calculate_ball_position(circle_reference_position, activation, ball_x_positi
 
 
 instruct_text = visual.TextStim(win=win, ori=0, name='instruct_text',
-    text=u'replace me', font=u'Arial',
+    text=u'replace me', font='Liberation Sans',
     pos=[0, 0], height=0.06, wrapWidth=1.2,
     color=u'white', colorSpace='rgb', opacity=1,
     depth=0.0)
@@ -512,7 +512,7 @@ instruct_text = visual.TextStim(win=win, ori=0, name='instruct_text',
 # Initialize components for Routine "finish"
 finishClock = core.Clock()
 thank_you_end_run_text = visual.TextStim(win=win, ori=0, name='thank_you_end_run_text',
-    text=u'thank you!',    font=u'Arial',
+    text=u'thank you!',    font='Liberation Sans',
     pos=[0, 0], height=0.1, wrapWidth=None,
     color=u'white', colorSpace='rgb', opacity=1,
     depth=0.0)
@@ -628,6 +628,12 @@ while continueRoutine:
 
             # reset trigger clock -- now it is keeping track of time relative to trigger!
             triggerClock.reset()
+
+            # Write trigger file so external scripts can detect the trigger
+            import tempfile
+            _trigger_path = os.path.join(tempfile.gettempdir(), 'psychopy_trigger')
+            with open(_trigger_path, 'w') as _tf:
+                _tf.write('triggered')
     
     # check if all components have finished
     if not continueRoutine:  # a component has requested a forced-end of Routine
@@ -668,7 +674,7 @@ t = 0
 baselineClock.reset()  # clock 
 frameN = -1
 frame = 0
-routineTimer.add(BaseLineTime)
+routineTimer.addTime(BaseLineTime)
 # update component parameters for each repeat
 # keep track of which components have finished
 baselineComponents = []
@@ -759,7 +765,7 @@ subject_key_target = event.BuilderKeyResponse()  # create an object of type KeyR
 subject_key_target.status = NOT_STARTED
 subject_key_reset = event.BuilderKeyResponse()  # create an object of type KeyResponse
 subject_key_reset.status = NOT_STARTED
-routineTimer.add(RUN_TIME)
+routineTimer.addTime(RUN_TIME)
 
 
 # Initialize parameters before feedback
@@ -929,7 +935,7 @@ while continueRoutine and routineTimer.getTime() > 0:
 t = 0
 baselineClock.reset()  # clock 
 frameN = -1
-routineTimer.add(1.00000)
+routineTimer.addTime(1.00000)
 # update component parameters for each repeat
 # keep track of which components have finished
 baselineComponents = []

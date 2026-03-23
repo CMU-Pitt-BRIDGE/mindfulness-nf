@@ -40,18 +40,15 @@ class MurfiActivationCommunicator:
     def _send(self, mesg):
         if not self._fake:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            #print("sock:",sock)
-            sock.connect((self._ip, self._port))
-            #print("sock.connect:",sock.connect((self._ip, self._port)))
-            #print("sock.sendall:",sock.sendall(mesg.encode('utf-8')))
-            sock.sendall(mesg.encode('utf-8'))
-            resp = sock.recv(4096)
-            #resp = resp.encode()
-            #print("resp:",type(resp))
-            #print(type(resp))
-            #print("volume #",volumes_count,resp)
-            sock.close()
-            return resp
+            try:
+                sock.connect((self._ip, self._port))
+                sock.sendall(mesg.encode('utf-8'))
+                resp = sock.recv(4096)
+                sock.close()
+                return resp
+            except (ConnectionRefusedError, ConnectionResetError, OSError):
+                sock.close()
+                return b'0'  # return zero activation if MURFI is unavailable
             
         else:
             for roi_name in self._rois_fake:

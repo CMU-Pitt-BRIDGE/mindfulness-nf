@@ -2,7 +2,8 @@
 
 Step-by-step instructions for configuring the MURFI workstation and Siemens scanner
 for the mindfulness neurofeedback protocol. Written from the 2026-03-20 setup at
-Pitt's BRIDGE Center (Siemens Prisma VE11C).
+Pitt's BRIDGE Center (Siemens Prisma VE11C). Updated 2026-04-10 to reflect the
+Textual TUI as the primary operator interface (see Section 6).
 
 ## 1. Workstation Hardware and OS
 
@@ -76,8 +77,11 @@ See `firewall-debugging-2026-03-20.md` for the full debugging account.
 
 ### Pre-flight network checks
 
-The session runner performs automated network verification before any scanning session.
-These checks run at the start of both localizer and NF sessions:
+The TUI performs 13 automated preflight checks before any scanning session
+(see `mindfulness_nf/orchestration/preflight.py`). All checks run concurrently via
+`asyncio.TaskGroup` and results appear in the preflight checklist widget.
+
+For manual debugging, the equivalent shell commands are:
 
 ```bash
 # 1. Ethernet interface on scanner subnet
@@ -422,12 +426,35 @@ rm -f "$DICOM_INPUT"/*.dcm    # Clear between runs
 
 ## 6. Running the Pipeline
 
-### Session 1: Localizer
+### Primary interface: Textual TUI
+
+The TUI is the primary operator interface. It replaces the previous zenity/bash
+workflow with single-keypress navigation, a traffic light status model, and
+automatic data validation.
 
 ```bash
+cd /home/young-lab/code/mindfulness-nf
+uv run mindfulness-nf           # Production mode
+uv run mindfulness-nf --test    # Dry-run mode (no scanner or MURFI required)
+```
+
+Screen flow: Subject Entry → Session Select → Localizer | Process | Neurofeedback | Test.
+
+See the main README for full TUI documentation.
+
+### Legacy shell scripts (reference only)
+
+The shell scripts in `murfi/scripts/` are retained as reference implementations
+but are no longer the primary interface. They document the underlying orchestration
+logic that the TUI now automates.
+
+```bash
+# Legacy (reference only — use the TUI instead):
 cd /home/young-lab/code/mindfulness-nf/murfi/scripts
 bash run_session.sh sub-001 localizer
 ```
+
+### Session 1: Localizer
 
 The localizer session orchestrates four steps. Here is what happens internally:
 
@@ -517,11 +544,15 @@ For each resting state run, the operator workflow is:
 3. Scan completes (~5 minutes)
 4. Operator sends DICOMs from Patient Browser to MURFI_DICOM
 5. MURFI picks up the DICOMs and saves them as NIfTI to `img/`
-6. Operator types `done`
+6. Operator presses `D` in the TUI (or types `done` in legacy scripts)
 
 ### Between sessions: Processing
 
+In the TUI, select session 2 ("Process") after the localizer completes.
+The legacy equivalent:
+
 ```bash
+# Legacy (reference only):
 bash run_session.sh sub-001 process
 ```
 
@@ -558,7 +589,10 @@ fi
 
 ### Session 2: Neurofeedback
 
+In the TUI, select session 3 ("Neurofeedback"). The legacy equivalent:
+
 ```bash
+# Legacy (reference only):
 bash run_session.sh sub-001 nf
 ```
 

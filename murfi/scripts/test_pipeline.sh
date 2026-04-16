@@ -282,9 +282,10 @@ level3() {
     NY=$(fslval "$REF" dim2)
     HALF_Y=$((NY / 2))
 
-    fslmaths "$REF" -thr 1 -bin mask/brain.nii
-    fslmaths mask/brain.nii -roi 0 -1 0 "$HALF_Y" 0 -1 0 1 mask/dmn.nii
-    fslmaths mask/brain.nii -roi 0 -1 "$HALF_Y" "$HALF_Y" 0 -1 0 1 mask/cen.nii
+    # MURFI expects INT16 masks (2 bytes/voxel); -odt short ensures this
+    fslmaths "$REF" -thr 1 -bin mask/brain.nii -odt short
+    fslmaths mask/brain.nii -roi 0 -1 0 "$HALF_Y" 0 -1 0 1 mask/dmn.nii -odt short
+    fslmaths mask/brain.nii -roi 0 -1 "$HALF_Y" "$HALF_Y" 0 -1 0 1 mask/cen.nii -odt short
     rm -f mask/brain.nii
 
     DMN_VOX=$(fslstats mask/dmn.nii -V | awk '{print $1}')

@@ -215,8 +215,8 @@ class NeurofeedbackScreen(Screen[None]):
             self._yellow_confirmed = False
             self._polling_paused = False
 
-        # Green or confirmed yellow: stop MURFI, start PsychoPy
-        self.run_worker(self._stop_murfi_and_start_psychopy(), exclusive=True)
+        # Green or confirmed yellow: start PsychoPy (MURFI keeps running)
+        self.run_worker(self._run_psychopy_phase(), exclusive=True)
 
     def _start_murfi_phase(self) -> None:
         """Show scan widgets and start MURFI for current run."""
@@ -286,16 +286,12 @@ class NeurofeedbackScreen(Screen[None]):
         except Exception:
             pass
 
-    async def _stop_murfi_and_start_psychopy(self) -> None:
-        """Stop MURFI, then run PsychoPy phase."""
-        if self._murfi_handle is not None:
-            from mindfulness_nf.orchestration import murfi
-            try:
-                await murfi.stop(self._murfi_handle)
-            except Exception:
-                pass
-            self._murfi_handle = None
+    async def _run_psychopy_phase(self) -> None:
+        """Run PsychoPy while MURFI continues serving activations.
 
+        MURFI must keep running so PsychoPy can query real-time ROI
+        activations on port 15001.  MURFI stops after PsychoPy exits.
+        """
         self._in_psychopy_phase = True
         self._update_step_tracker()
 
@@ -324,6 +320,16 @@ class NeurofeedbackScreen(Screen[None]):
             log.add_line(f"PsychoPy finished (exit code {exit_code})")
         except Exception as exc:
             log.add_line(f"PsychoPy error: {exc}")
+
+        # Stop MURFI after PsychoPy finishes
+        if self._murfi_handle is not None:
+            from mindfulness_nf.orchestration import murfi
+            try:
+                await murfi.stop(self._murfi_handle)
+            except Exception:
+                pass
+            self._murfi_handle = None
+            log.add_line("MURFI stopped")
 
         # Compute scale factor for feedback runs
         if feedback:

@@ -273,12 +273,14 @@ level3() {
     fi
     cp "$REF" xfm/study_ref.nii 2>/dev/null || true
 
-    # Register MNI to native
-    flirt -in "${MASKS_DIR}/MNI152_T1_2mm_brain.nii" \
-          -ref "$REF" \
-          -omat xfm/mni2native.mat \
-          -out xfm/mni2native.nii \
-          -dof 12 2>/dev/null
+    # Register native→MNI (corratio handles T2*/T1 contrast mismatch),
+    # then invert — matches the real pipeline (feedback.sh line 444-445)
+    flirt -in "$REF" \
+          -ref "${MASKS_DIR}/MNI152_T1_2mm_brain.nii" \
+          -omat xfm/native2mni.mat \
+          -out xfm/native2mni.nii \
+          -dof 12 -cost corratio 2>/dev/null
+    convert_xfm -omat xfm/mni2native.mat -inverse xfm/native2mni.mat
 
     # Apply to DMN and CEN masks
     flirt -in "${MASKS_DIR}/DMNax_brainmaskero2.nii" \

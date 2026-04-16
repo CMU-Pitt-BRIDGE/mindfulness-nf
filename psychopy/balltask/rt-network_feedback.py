@@ -30,12 +30,19 @@ import locale
 from bids_tsv_convert_balltask import *
 
 # button box (scanner) + keyboard alternatives (testing)
+# Scanner: Current Designs HHSC-2x1-CYL with Birch (HID KEY BYGRT mode)
+#   Blue button -> 'b', Yellow button -> 'y'
+#   Both pressed within 300ms -> confirm
 left_button='3'
 right_button='1'
 enter_button='4'
-left_keys = [left_button, 'left']
-right_keys = [right_button, 'right']
+bbox_left = 'b'    # blue button
+bbox_right = 'y'   # yellow button
+BOTH_PRESS_WINDOW = 0.3  # seconds to detect simultaneous press
+left_keys = [left_button, 'left', bbox_left]
+right_keys = [right_button, 'right', bbox_right]
 enter_keys = [enter_button, 'return', 'space']
+all_slider_keys = left_keys + right_keys + enter_keys
 
 # Ensure that relative paths start from the same directory as this script
 _thisDir = os.path.dirname(os.path.abspath(__file__))
@@ -302,7 +309,7 @@ with open(run_questions_file, 'a') as csvfile:
     stim_writer.writerow(["id", "run", 'feedback_on', "question_text", "response", "rt"])  
 
 slider_instruction = visual.TextStim(win=win, ori=0, name='text',
-        text="You'll see a few slider questions next\nPress the left and right buttons to move the slider\nAnd the top button to enter your response\nPress any button to continue", font='Liberation Sans',
+        text="You'll see a few slider questions next\nPress blue to move left, yellow to move right\nPress both buttons together to confirm\nPress any button to continue", font='Liberation Sans',
         pos=[0, 0.2], height=0.06, wrapWidth=1.2,
         color=u'white', colorSpace='rgb', opacity=1,
         depth=0.0)
@@ -329,22 +336,54 @@ def run_slider(question_text='Default Text', left_label='left', right_label='rig
     vas.draw()
     slider_question.draw()
     win.flip()
-    all_keys = left_keys + right_keys + enter_keys
+    # Track first button box press for dual-press confirm detection
+    pending_bbox_key = None
+    pending_bbox_time = 0.0
     continueRoutine = True
     while continueRoutine:
-        keys = event.getKeys(keyList=all_keys)
-        if len(keys):
-            if any(k in keys for k in left_keys):
-                vas.markerPos = vas.markerPos - 1
-            elif any(k in keys for k in right_keys):
-                vas.markerPos = vas.markerPos  + 1
-            elif any(k in keys for k in enter_keys):
-                vas.rating=vas.markerPos
-                continueRoutine=False
+        keys = event.getKeys(keyList=all_slider_keys, timeStamped=True)
+        for key, timestamp in keys:
+            # Keyboard enter keys: immediate confirm
+            if key in enter_keys:
+                vas.rating = vas.markerPos
+                continueRoutine = False
+                break
+
+            # Button box: check for dual-press confirm
+            is_bbox = key in (bbox_left, bbox_right)
+            if is_bbox and pending_bbox_key is not None:
+                # Second bbox key arrived — check if within window
+                if abs(timestamp - pending_bbox_time) <= BOTH_PRESS_WINDOW:
+                    vas.rating = vas.markerPos
+                    continueRoutine = False
+                    pending_bbox_key = None
+                    break
+
+            # Single key action (left or right)
+            if key in left_keys:
+                vas.markerPos = max(1, vas.markerPos - 1)
+                if is_bbox:
+                    pending_bbox_key = key
+                    pending_bbox_time = timestamp
+                else:
+                    pending_bbox_key = None
+            elif key in right_keys:
+                vas.markerPos = min(9, vas.markerPos + 1)
+                if is_bbox:
+                    pending_bbox_key = key
+                    pending_bbox_time = timestamp
+                else:
+                    pending_bbox_key = None
+
             vas.draw()
             slider_question.draw()
             win.flip()
-            print(keys)
+            print([key])
+
+        # Expire stale pending press
+        if pending_bbox_key is not None:
+            if core.getTime() - pending_bbox_time > BOTH_PRESS_WINDOW:
+                pending_bbox_key = None
 
     print(f'Rating: {vas.rating}, RT: {vas.rt}')
     with open(run_questions_file, 'a') as csvfile:
@@ -1006,7 +1045,7 @@ for thisComponent in finishComponents:
 if run_stop_time >= 60:
     slider_instruction.draw()
     win.flip()
-    wait_for_keypress(key_list=left_keys + right_keys + enter_keys)
+    wait_for_keypress(key_list=all_slider_keys)
 
     run_slider(question_text='How often were you using the mental noting practice?',
                     left_label='Never', right_label='Always')

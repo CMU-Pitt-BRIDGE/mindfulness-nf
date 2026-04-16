@@ -93,7 +93,7 @@ class MurfiActivationCommunicator:
             print(tr)
 
         if tr < 0 or tr >= self._num_trs:
-            raise ValueError("Requested TR out of bounds (tr=%s" % tr)
+            return float('nan')
 
         return self._rois[roi_name]['activation'][tr]
 

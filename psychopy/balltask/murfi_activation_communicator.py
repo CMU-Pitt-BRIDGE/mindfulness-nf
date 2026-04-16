@@ -62,8 +62,7 @@ class MurfiActivationCommunicator:
 
     def _ask_for_roi_activation(self, roi_name, tr):
         if tr >= self._num_trs:
-            raise ValueError("Requested TR out of bounds")
-            return
+            return float('nan')
 
         to_send = self._roi_query
         to_send = to_send.replace('__TR__', str(tr + 1))

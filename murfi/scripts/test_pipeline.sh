@@ -261,9 +261,8 @@ level3() {
         echo "[Step 1/5] Reference image exists, skipping."
     fi
 
-    # --- Step 2: Create masks from MNI templates ---
-    echo "[Step 2/5] Registering MNI template masks to native space..."
-    MASKS_DIR="${SCRIPT_PATH}/masks"
+    # --- Step 2: Create test masks in native space ---
+    echo "[Step 2/5] Creating test masks from reference image..."
     cd "${TEST_SUBJECT_DIR}"
 
     # Find the reference image
@@ -273,31 +272,28 @@ level3() {
     fi
     cp "$REF" xfm/study_ref.nii 2>/dev/null || true
 
-    # Register native→MNI (corratio handles T2*/T1 contrast mismatch),
-    # then invert — matches the real pipeline (feedback.sh line 444-445)
-    flirt -in "$REF" \
-          -ref "${MASKS_DIR}/MNI152_T1_2mm_brain.nii" \
-          -omat xfm/native2mni.mat \
-          -out xfm/native2mni.nii \
-          -dof 12 -cost corratio 2>/dev/null
-    convert_xfm -omat xfm/mni2native.mat -inverse xfm/native2mni.mat
+    # MNI→native registration is unreliable from a 2-volume functional
+    # reference (wrong contrast, low SNR). Instead, create non-overlapping
+    # masks directly in native space by splitting the brain into posterior
+    # (DMN-like) and anterior (CEN-like) halves using fslmaths -roi.
+    # These are not anatomically accurate — they exist so MURFI computes
+    # real weighted-average activations for the end-to-end test.
+    # Real sessions use ICA-derived masks (feedback.sh process_roi_masks).
+    NY=$(fslval "$REF" dim2)
+    HALF_Y=$((NY / 2))
 
-    # Apply to DMN and CEN masks
-    flirt -in "${MASKS_DIR}/DMNax_brainmaskero2.nii" \
-          -ref "$REF" \
-          -applyxfm -init xfm/mni2native.mat \
-          -interp nearestneighbour \
-          -out mask/dmn.nii -datatype short 2>/dev/null
-
-    flirt -in "${MASKS_DIR}/CENa_brainmaskero2.nii" \
-          -ref "$REF" \
-          -applyxfm -init xfm/mni2native.mat \
-          -interp nearestneighbour \
-          -out mask/cen.nii -datatype short 2>/dev/null
+    fslmaths "$REF" -thr 1 -bin mask/brain.nii
+    fslmaths mask/brain.nii -roi 0 -1 0 "$HALF_Y" 0 -1 0 1 mask/dmn.nii
+    fslmaths mask/brain.nii -roi 0 -1 "$HALF_Y" "$HALF_Y" 0 -1 0 1 mask/cen.nii
+    rm -f mask/brain.nii
 
     DMN_VOX=$(fslstats mask/dmn.nii -V | awk '{print $1}')
     CEN_VOX=$(fslstats mask/cen.nii -V | awk '{print $1}')
-    echo "  DMN: ${DMN_VOX} voxels, CEN: ${CEN_VOX} voxels"
+    echo "  DMN: ${DMN_VOX} voxels (posterior), CEN: ${CEN_VOX} voxels (anterior)"
+    if [ "$DMN_VOX" -eq 0 ] || [ "$CEN_VOX" -eq 0 ]; then
+        echo "ERROR: empty mask — reference image may be blank"
+        exit 1
+    fi
 
     # --- Step 3: Adjust rtdmn.xml for 85 volumes ---
     echo "[Step 3/5] Configuring feedback XML for 85 volumes..."

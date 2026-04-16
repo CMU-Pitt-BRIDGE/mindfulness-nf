@@ -29,10 +29,13 @@ import shlex
 import locale
 from bids_tsv_convert_balltask import *
 
-# button box
+# button box (scanner) + keyboard alternatives (testing)
 left_button='3'
 right_button='1'
 enter_button='4'
+left_keys = [left_button, 'left']
+right_keys = [right_button, 'right']
+enter_keys = [enter_button, 'return', 'space']
 
 # Ensure that relative paths start from the same directory as this script
 _thisDir = os.path.dirname(os.path.abspath(__file__))
@@ -326,15 +329,16 @@ def run_slider(question_text='Default Text', left_label='left', right_label='rig
     vas.draw()
     slider_question.draw()
     win.flip()
+    all_keys = left_keys + right_keys + enter_keys
     continueRoutine = True
     while continueRoutine:
-        keys = event.getKeys(keyList=[left_button, right_button, enter_button])
+        keys = event.getKeys(keyList=all_keys)
         if len(keys):
-            if left_button in keys:
+            if any(k in keys for k in left_keys):
                 vas.markerPos = vas.markerPos - 1
-            elif right_button in keys:
-                vas.markerPos = vas.markerPos  + 1 
-            elif enter_button in keys:
+            elif any(k in keys for k in right_keys):
+                vas.markerPos = vas.markerPos  + 1
+            elif any(k in keys for k in enter_keys):
                 vas.rating=vas.markerPos
                 continueRoutine=False
             vas.draw()
@@ -1002,7 +1006,7 @@ for thisComponent in finishComponents:
 if run_stop_time >= 60:
     slider_instruction.draw()
     win.flip()
-    wait_for_keypress(key_list=[right_button, left_button, enter_button])
+    wait_for_keypress(key_list=left_keys + right_keys + enter_keys)
 
     run_slider(question_text='How often were you using the mental noting practice?',
                     left_label='Never', right_label='Always')

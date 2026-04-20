@@ -64,7 +64,7 @@ This is a significant refactor (~800–1200 LOC changed) but the risk is bounded
 
 - **FCIS honored.** `SessionState` is `frozen=True, slots=True` like everything else in `models.py`; all transitions return a new instance. The TUI holds no state other than "which state did the runner notify me about."
 - **Single `SessionScreen`.** Localizer, RT15, RT30 become *data* (step lists in `sessions.py`), not separate screen classes. `LocalizerScreen`, `NeurofeedbackScreen`, and `TestScreen` are deleted.
-- **Resume is automatic.** On session start, `SessionRunner.__init__` checks for an existing `session_state.json` and loads it. Any step with `status=running` at load time is coerced to `failed`, because the process that was running is gone.
+- **Resume is automatic.** `SessionRunner.load_or_create(...)` checks for an existing `session_state.json` and loads it; otherwise builds fresh from `SESSION_CONFIGS`. Any step with `status=running` at load time is coerced to `failed`, because the process that was running is gone.
 - **Dry-run is one adapter swap.** `ScannerSource` is a `Protocol`. `SimulatedScannerSource` replays cached volumes. MURFI and PsychoPy are unmodified.
 
 ## Data model
@@ -211,7 +211,13 @@ class SessionState:
         self, i: int, ts: str, artifacts: dict[str, Any] | None = None
     ) -> SessionState
     def mark_failed(self, i: int, ts: str, error: str | None = None) -> SessionState
-    def clear_current(self) -> SessionState   # status=pending, progress=0, attempts+=1
+    def clear_current(self) -> SessionState
+        # Resets the cursor step to a clean-slate pending state:
+        #   status=pending, progress_current=0, attempts+=1,
+        #   detail_message=None, error=None, phase=None,
+        #   awaiting_advance=False, last_started=None, last_finished=None,
+        #   artifacts=None.
+        # Config is preserved.
     def set_progress(                         # renamed from set_volumes; generic
         self, i: int, value: int,
         detail: str | None = None,
@@ -342,7 +348,12 @@ class SessionRunner:
 
     @classmethod
     def load_or_create(
-        cls, subject_dir: Path, session_type: str, *args, **kw
+        cls,
+        subject_dir: Path,
+        session_type: str,
+        pipeline: PipelineConfig,
+        scanner_config: ScannerConfig,
+        scanner_source: ScannerSource,
     ) -> SessionRunner:
         """If session_state.json exists, load and coerce running→failed.
         Otherwise, create a fresh SessionState from SESSION_CONFIGS."""
@@ -400,12 +411,24 @@ class SessionRunner:
         """Pass-through to current executor's components() or ()."""
 
     # --- Internals ------------------------------------------------------
+    # Instance attributes (set by __init__; mutated only by the methods above):
+    #   self._state: SessionState
+    #   self._current_task: asyncio.Task | None   # non-None iff a step is running
+    #   self._current_executor: StepExecutor | None
+    #   self._subscribers: list[Callable[[SessionState], None]]
+
     def _executor_for(self, step: StepConfig) -> StepExecutor:
         """Dispatch on StepKind to the right concrete executor,
         passing all required deps (scanner_source, configs, subject_dir)."""
     def _apply(self, new_state: SessionState) -> None:
         """Atomic: persist JSON, update self._state, notify subscribers."""
 ```
+
+### TUI screen lifecycle and runner cleanup
+
+`SessionScreen` owns exactly one `SessionRunner` instance. When the screen is dismissed (e.g., operator navigates back to `SessionSelectScreen`, or the app exits), the screen's `on_unmount` handler MUST `await runner.stop_current()` before returning. Otherwise the in-flight `asyncio.Task` gets orphaned: its subprocesses keep running, but no one is listening to their progress, and the state file no longer updates.
+
+`esc` handling goes through this same path (prompt-then-stop-then-exit) rather than tearing the screen down abruptly.
 
 ### Subprocess ownership — per-executor, not a central `ProcessGroup`
 
@@ -447,32 +470,34 @@ class RealScannerSource:
 class SimulatedScannerSource:
     """Replays cached volumes at configured TR."""
 
-    cache_dir: Path          # e.g., subjects/sub-test/sourcedata/murfi/img/
+    cache_dir: Path          # murfi/dry_run_cache/ — sibling of murfi/subjects/, gitignored
     tr_seconds: float = 1.2
     # For VSEND_SCAN: shell out to `vSend` on cached NIfTIs.
-    # For DICOM_SCAN: shell out to `dcmsend` on cached DICOMs (or
-    #   convert cached NIfTIs → DICOMs once and cache that too).
+    # For DICOM_SCAN: shell out to `dcmsend` on cached DICOMs.
 ```
+
+`ScannerSource.cancel()` is invoked by the executor when `stop()` is called mid-push — it terminates any in-flight `vSend` or `dcmsend` subprocess the source has spawned, so the overall step-stop completes within its 5-second budget.
 
 A one-time script (`scripts/populate_dry_run_cache.py`) primes the cache by copying one real session's `sourcedata/murfi/img/` to the cache directory.
 
 ## Data flow
 
-### Operator presses **D** on a pending Feedback 2
+### D key dispatch — three cases, dispatched by the TUI
+
+The TUI reads `state.current.status` and `state.current.awaiting_advance` to pick which runner method to call.
+
+**Case 1 — D on `pending`** (operator starts the step):
 
 ```
-SessionScreen  ──D──▶  Runner.advance()
-                           │
-                           ├─▶ state.advance()          (new cursor)
-                           ├─▶ persist session_state.json
-                           ├─▶ notify subscribers
-                           │
-                           └─▶ Runner.start_current()
+SessionScreen  ──D──▶  Runner.start_current()
                                     │
+                                    ├─▶ if self._current_task and not done: refuse + notify
                                     ├─▶ executor = Runner._executor_for(step)
+                                    ├─▶ self._current_executor = executor
                                     ├─▶ state.mark_running(cursor, ts) + persist + notify
                                     ├─▶ task = asyncio.create_task(
                                     │         executor.run(on_progress=Runner._on_progress))
+                                    ├─▶ self._current_task = task
                                     └─▶ supervisor coroutine awaits task:
                                             try:
                                                 outcome = await task
@@ -488,8 +513,38 @@ SessionScreen  ──D──▶  Runner.advance()
                                                 else:
                                                     state.mark_failed(cursor, ts,
                                                         error=outcome.error)
-                                            → persist + notify
+                                            persist + notify
+                                            self._current_task = None
+                                            self._current_executor = None
+```
 
+**Case 2 — D on `running` with `awaiting_advance=True`** (operator gates MURFI→PsychoPy):
+
+```
+SessionScreen  ──D──▶  Runner.advance_phase_current()
+                           └─▶ self._current_executor.advance_phase()
+                               (executor's internal Event gets set; Phase 2 begins;
+                                on_progress resumes firing with phase="psychopy",
+                                awaiting_advance=False)
+```
+
+**Case 3 — D on `completed`** (operator moves to next step):
+
+```
+SessionScreen  ──D──▶  Runner.advance()              (pure cursor move + chain start)
+                           ├─▶ state.advance()       (cursor+=1; clamped at last step)
+                           ├─▶ persist + notify
+                           │
+                           └─▶ if new cursor step is pending AND no other step running:
+                                  auto-call Runner.start_current()
+                                  (preserves the current "one D press = move on" UX)
+```
+
+To inspect a pending step without starting it, the operator uses `n`/`→` or `b`/`←` — these are pure cursor navigation and never invoke `start_current`.
+
+**Progress updates during any running step:**
+
+```
 on_progress(p: StepProgress)  ──▶  state.set_progress(
                                         cursor, p.value,
                                         detail=p.detail,
@@ -497,12 +552,6 @@ on_progress(p: StepProgress)  ──▶  state.set_progress(
                                         awaiting_advance=p.awaiting_advance,
                                     )
                                         ├─▶ persist + notify
-
-D key during multi-phase step at phase gate:
-  SessionScreen  ──D──▶  Runner.advance_phase_current()
-                             └─▶ current_executor.advance_phase()
-                                 (executor's internal Event gets set; Phase 2 begins;
-                                  on_progress resumes firing with phase="psychopy")
 
 SessionScreen  ◀── notify(new_state) ── re-renders from new_state
 ```
@@ -522,12 +571,14 @@ Behavior depends on the current step's status.  The TUI help bar shows only keys
 | `d` | status=pending | Start the step (`runner.start_current()`). |
 | `d` | status=running, `awaiting_advance=True` | Advance phase (`runner.advance_phase_current()`). Cursor unchanged. |
 | `d` | status=running, `awaiting_advance=False` | No-op — completion is automatic when `run()` returns `StepOutcome`. |
-| `d` | status=completed | Move cursor to next step (`runner.advance()`). |
+| `d` | status=completed | `runner.advance()` — move cursor forward. If the new cursor step is `pending` AND no other step is running, auto-call `start_current()` so one D press moves the session on. |
 | `d` | status=failed | No-op. Help bar reads "FAILED — press R to redo or N to skip". |
-| `r` | any status | Restart step at cursor: stop if running, clear this step's files, increment attempts, mark pending, then start. **On status=completed, prompts for confirmation ("Clear and re-run this completed step?").** |
-| `i` | status=running | Interrupt: stop processes cleanly, clear partial data, mark pending. Cursor unchanged. |
-| `i` | status=failed | Clear partial data and mark pending (no restart). Symmetric to the running case; useful when the operator wants to tidy up without immediately retrying. |
-| `i` | status=pending or completed | No-op with notification "nothing to interrupt". |
+| `r` | cursor step is not running AND no other step is running | Restart step at cursor: clear this step's files, reset per-attempt state, increment attempts, start fresh. **On status=completed, prompts for confirmation ("Clear and re-run this completed step?").** |
+| `r` | cursor step is running | Clear + restart in place (stop → clear → start). |
+| `r` | cursor ≠ running step AND another step is running | Refused with notification "another step is running — interrupt it first or navigate to it." |
+| `i` | any step is running (anywhere) | Interrupt: stop the running step's processes, clear its partial data, mark it pending. Cursor unchanged. (Note: `i` targets the running step, not the cursor step.) |
+| `i` | no step running AND cursor step is failed | Clear cursor step's partial data, mark pending (no restart). Lets operator tidy a failed step without retrying. |
+| `i` | no step running AND cursor is pending or completed | No-op with notification "nothing to interrupt". |
 | `b` / `←` | any | Pure cursor move backward. Never touches the running step. |
 | `n` / `→` | any | Pure cursor move forward. |
 | `g` | any | Prompt for step number; jump cursor. |
@@ -541,8 +592,10 @@ Bottom of screen shows only the actions that are valid for the current `(step_st
 
 ```
 ▶ Feedback 3  (running, 87/150 vols)
-  [d] Done   [i] Interrupt   [m] Restart MURFI   [b/n] Navigate
+  [i] Interrupt   [m] Relaunch MURFI   [b/n] Navigate
 ```
+
+(Note: no `[d]` while `awaiting_advance=False` on a running step — completion is automatic; D becomes valid again when the step completes or reaches a phase gate.)
 
 ### Recovery scenarios (all reproduced by integration tests — see Testing)
 
@@ -598,7 +651,7 @@ On `SessionRunner.load_or_create`:
 2. If missing, build a fresh `SessionState` from `SESSION_CONFIGS[session_type]` and the current code's step configs.
 3. If present:
    - Parse JSON. If `schema_version` is unknown, surface a clear error and refuse to load (operator can delete the file to start fresh).
-   - For each step with `status=running`, set `status=failed` with `detail_message="interrupted by restart"` (the process that was running is gone; we don't know if partial data on disk is valid).
+   - For each step with `status=running`, set `status=failed` with `error="interrupted by restart"` (the process that was running is gone; we don't know if partial data on disk is valid). The `error` field is the right slot — `detail_message` is for progress narration during run, not terminal reasons.
    - Partial `.nii` files from the interrupted step are **left on disk**. The operator can inspect them; pressing `r` clears them. Automatic clearing on resume would be surprising.
    - Construct `SessionState` from the JSON's **persisted step configs** (not from `SESSION_CONFIGS` — self-contained resume, robust to code drift). Set `updated_at=now`, persist.
 4. Render TUI from state. Operator lands on the recorded cursor.
@@ -651,8 +704,10 @@ def runner(tmp_path):
     return SessionRunner(
         state=fresh_state("rt15", tmp_path),
         subject_dir=tmp_path,
+        pipeline=PipelineConfig.test_fixture(),
+        scanner_config=ScannerConfig.test_fixture(),
         scanner_source=NoOpScannerSource(),
-    )  # _executor_for overridden in tests to return FakeStepExecutor
+    )  # _executor_for monkey-patched in tests to return FakeStepExecutor
 
 async def test_start_current_transitions_pending_to_running(runner): ...
 async def test_start_current_refuses_when_another_step_running(runner): ...
@@ -752,9 +807,10 @@ async def test_advance_phase_before_murfi_complete_is_ignored():
     was called but executor's internal guard ignores it (MURFI phase not
     yet done). Progress continues as normal."""
 
-async def test_rt30_session_uses_all_13_feedback_phase_runs():
-    """Assert RT30 config exposes exactly 15 steps (Setup, 2vol,
-    TransferPre, Fb1-5, TransferPost1, Fb6-10, TransferPost2)."""
+async def test_rt30_config_has_15_steps_with_13_feedback_phase_runs():
+    """Assert RT30 config exposes exactly 15 StepConfig entries:
+    Setup + 2vol + 13 feedback-phase runs (TransferPre, Fb1-5,
+    TransferPost1, Fb6-10, TransferPost2)."""
 
 async def test_bids_naming_matches_scanner_pdf():
     """For each session type, assert that on completion each run's
@@ -778,6 +834,30 @@ async def test_partial_scan_fails_without_force_complete():
 async def test_fresh_vs_load_chosen_by_json_presence():
     """No session_state.json → fresh SessionState from SESSION_CONFIGS.
     With session_state.json → load and reconstruct from persisted configs."""
+
+async def test_d_on_completed_advances_and_auto_starts_next_pending():
+    """Feedback 1 completes cleanly. Press D. Verify cursor moves to
+    Feedback 2 AND Feedback 2 transitions to running (one D press,
+    not two)."""
+
+async def test_d_on_completed_last_step_is_noop():
+    """Final step of RT15 (Transfer Post) completes. Press D. Verify
+    cursor stays at last step, no new step starts (clamped)."""
+
+async def test_r_refused_when_cursor_not_running_step():
+    """Feedback 2 is running. Navigate cursor to completed Feedback 1.
+    Press R. Verify a notification 'another step is running' appears
+    and Feedback 1 data is NOT cleared."""
+
+async def test_interrupt_targets_running_step_regardless_of_cursor():
+    """Feedback 2 is running. Navigate cursor to pending Feedback 5.
+    Press I. Verify Feedback 2 (the running step) is stopped and
+    cleared — not Feedback 5."""
+
+async def test_screen_unmount_calls_stop_current():
+    """Start a step, dismiss SessionScreen programmatically. Verify
+    runner.stop_current() was awaited before the screen tore down,
+    and the subprocess is no longer alive."""
 
 async def test_process_session_runs_all_fsl_stages():
     """Golden path: dry-run PROCESS session from Setup through QC,

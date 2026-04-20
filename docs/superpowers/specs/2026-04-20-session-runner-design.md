@@ -225,7 +225,7 @@ class SessionState:
     def set_progress(                         # renamed from set_volumes; generic
         self, i: int, value: int,
         detail: str | None = None,
-        phase: str | None = None,
+        phase: Phase | None = None,
         awaiting_advance: bool = False,
     ) -> SessionState
     @property
@@ -576,7 +576,7 @@ Behavior depends on the current step's status.  The TUI help bar shows only keys
 | `d` | status=running, `awaiting_advance=True` | Advance phase (`runner.advance_phase_current()`). Cursor unchanged. |
 | `d` | status=running, `awaiting_advance=False` | No-op — completion is automatic when `run()` returns `StepOutcome`. |
 | `d` | status=completed | `runner.advance()` — move cursor forward. If the new cursor step is `pending` AND no other step is running, auto-call `start_current()` so one D press moves the session on. |
-| `d` | status=failed | No-op. Help bar reads "FAILED — press R to redo or N to skip". |
+| `d` | status=failed | No-op. Help bar reads "FAILED — press R to redo, I to clear to pending, or N/→ to move cursor away (step stays failed; session cannot complete until resolved)". |
 | `r` | cursor step is not running AND no other step is running | Restart step at cursor: clear this step's files, reset per-attempt state, increment attempts, start fresh. **On status=completed, prompts for confirmation ("Clear and re-run this completed step?").** |
 | `r` | cursor step is running | Clear + restart in place (stop → clear → start). |
 | `r` | cursor ≠ running step AND another step is running | Refused with notification "another step is running — interrupt it first or navigate to it." |
@@ -606,7 +606,7 @@ Bottom of screen shows only the actions that are valid for the current `(step_st
 **A. MURFI dies mid-scan at vol 50/150 of Feedback 2.**
 
 - Executor's `run()` sees the MURFI subprocess exit with non-zero returncode, returns `StepOutcome(succeeded=False, error="MURFI exited 1")`.
-- Runner's supervisor coroutine awaits the task, receives the outcome, calls `state.mark_failed(idx)`, persists, notifies.
+- Runner's supervisor coroutine awaits the task, receives the outcome, calls `state.mark_failed(idx, ts=now_iso(), error=outcome.error)`, persists, notifies.
 - TUI: *"Feedback 2 FAILED — MURFI exited at vol 50/150. Press R to clear & restart, M to relaunch MURFI only, → to skip."*
 - Operator presses `r` → runner clears step files, increments `attempts`, marks pending, starts fresh.
 

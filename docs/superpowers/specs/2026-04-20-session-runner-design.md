@@ -7,7 +7,7 @@
 
 ## Problem
 
-The current TUI implements a forward-only wizard whose state lives in Python instance variables on each `Screen` subclass. This causes four failure modes the operator cannot recover from:
+The current TUI implements a forward-only wizard whose state lives in Python instance variables on each `Screen` subclass. This causes five failure modes the operator cannot recover from:
 
 1. **Brittle gating.** A step marked complete cannot be redone. A step in `RED` cannot be advanced. Mid-session failures force the operator to quit the TUI and lose context from every prior step.
 2. **No process resilience.** MURFI or PsychoPy dying mid-run orphans the session. There is no way to restart only the dead component.
@@ -113,28 +113,41 @@ Rationale:
 
 ### `session_state.json` schema
 
+The JSON is **self-contained**: it persists the full `StepConfig` for each step so resume is robust to drift in `SESSION_CONFIGS`. A session started under one config version can be resumed cleanly after code changes (new fields default to None; removed fields are ignored).
+
 ```json
 {
+  "schema_version": 1,
   "subject": "sub-001",
   "session_type": "rt15",
   "created_at": "2026-04-20T14:02:00Z",
   "updated_at": "2026-04-20T14:37:00Z",
-  "schema_version": 1,
   "cursor": 4,
   "steps": [
-    {"name": "Setup",        "task": null,          "run": null, "expected": 0,   "status": "completed", "attempts": 1, "received": 0,   "last_started": "...", "last_finished": "..."},
-    {"name": "2-volume",     "task": "2vol",        "run": 1,    "expected": 2,   "status": "completed", "attempts": 1, "received": 2},
-    {"name": "Transfer Pre", "task": "transferpre", "run": 1,    "expected": 150, "status": "completed", "attempts": 2, "received": 150},
-    {"name": "Feedback 1",   "task": "feedback",    "run": 1,    "expected": 150, "status": "completed", "attempts": 1, "received": 150},
-    {"name": "Feedback 2",   "task": "feedback",    "run": 2,    "expected": 150, "status": "failed",    "attempts": 1, "received": 87}
+    {
+      "config": {
+        "name": "Feedback 2", "task": "feedback", "run": 2,
+        "progress_target": 150, "progress_unit": "volumes",
+        "xml_name": "rtdmn.xml", "kind": "nf_run",
+        "feedback": true, "fsl_command": null
+      },
+      "status": "failed",
+      "attempts": 1,
+      "progress_current": 87,
+      "last_started": "2026-04-20T14:35:00Z",
+      "last_finished": "2026-04-20T14:36:40Z",
+      "detail_message": "MURFI exited 1 at vol 87",
+      "artifacts": null
+    }
   ]
 }
 ```
 
 - `status` ∈ `{pending, running, completed, failed}`.
-- A step is only persisted as `completed` after `validate_step_data()` confirms the disk matches `expected`.
-- `attempts` increments each time `clear_and_restart_current` runs.
+- A step is only persisted as `completed` after per-kind disk validation inside the executor confirms success.
+- `attempts` increments each time `clear_and_restart_current` or `interrupt_current` runs.
 - `cursor` is decoupled from execution: it tracks where the *operator is looking*, not what is running.
+- On load: if `schema_version` is unknown, refuse to deserialize and surface a clear error. The operator can then delete the file to start fresh.
 
 ### Python models (extensions to `mindfulness_nf/models.py`)
 
@@ -169,15 +182,18 @@ class StepState:
     config: StepConfig
     status: StepStatus = StepStatus.PENDING
     attempts: int = 0
-    progress_current: int = 0    # scans: received volumes; compute: percent/stage idx
-    last_started: str | None = None   # ISO-8601 UTC
+    progress_current: int = 0            # scans: received volumes; compute: percent/stage idx
+    last_started: str | None = None      # ISO-8601 UTC
     last_finished: str | None = None
     detail_message: str | None = None    # e.g., "MELODIC stage 3/8 — dimension estimation"
+    phase: str | None = None             # "murfi" | "psychopy" for NF_RUN mid-step
+    awaiting_advance: bool = False       # True iff D should call advance_phase_current()
+    artifacts: dict[str, Any] | None = None   # executor-specific outputs
 
 @dataclass(frozen=True, slots=True)
 class SessionState:
     subject: str
-    session_type: str            # "loc3" | "rt15" | "rt30"
+    session_type: str                   # "loc3" | "rt15" | "rt30" | "process"
     cursor: int
     steps: tuple[StepState, ...]
     created_at: str
@@ -188,14 +204,20 @@ class SessionState:
     def go_back(self) -> SessionState
     def select(self, i: int) -> SessionState
     def mark_running(self, i: int, ts: str) -> SessionState
-    def mark_completed(self, i: int, ts: str) -> SessionState
-    def mark_failed(self, i: int, ts: str) -> SessionState
-    def clear_current(self) -> SessionState  # status=pending, received=0, attempts+=1
-    def set_volumes(self, i: int, n: int) -> SessionState
+    def mark_completed(
+        self, i: int, ts: str, artifacts: dict[str, Any] | None = None
+    ) -> SessionState
+    def mark_failed(self, i: int, ts: str, error: str | None = None) -> SessionState
+    def clear_current(self) -> SessionState   # status=pending, progress=0, attempts+=1
+    def set_progress(                         # renamed from set_volumes; generic
+        self, i: int, value: int,
+        detail: str | None = None,
+        phase: str | None = None,
+    ) -> SessionState
     @property
-    def current(self) -> StepState  # steps[cursor]
+    def current(self) -> StepState            # steps[cursor]
     @property
-    def running_index(self) -> int | None
+    def running_index(self) -> int | None     # unique (invariant: at most one)
 ```
 
 ### Session configurations (new file: `mindfulness_nf/sessions.py`)
@@ -241,8 +263,9 @@ RT30: tuple[StepConfig, ...] = (
 # RT30 has 15 steps: Setup, 2vol, TransferPre, Fb1-5, TransferPost1, Fb6-10, TransferPost2.
 
 PROCESS: tuple[StepConfig, ...] = (
-    StepConfig("Setup",          None,        None, 0,   "none",    None, StepKind.SETUP),
-    StepConfig("Select sources", "select",    None, 1,   "stages",  None, StepKind.PROCESS_STAGE, fsl_command="select_runs"),
+    StepConfig("Setup + select", None,        None, 1,   "stages",  None, StepKind.SETUP),
+    # ↑ Interactive: preflight + operator picks which rest runs to process.
+    #   Selected run list stored in StepOutcome.artifacts["selected_runs"].
     StepConfig("Merge rests",    "merge",     None, 100, "percent", None, StepKind.PROCESS_STAGE, fsl_command="fslmerge"),
     StepConfig("MELODIC ICA",    "melodic",   None, 100, "percent", None, StepKind.PROCESS_STAGE, fsl_command="melodic"),
     StepConfig("Extract DMN",    "dmn_mask",  None, 100, "percent", None, StepKind.PROCESS_STAGE, fsl_command="extract_dmn"),
@@ -268,10 +291,13 @@ Every step kind (VSEND_SCAN, DICOM_SCAN, NF_RUN, PROCESS_STAGE) is handled by an
 
 Concrete implementations:
 
-- `VsendStepExecutor`: launches MURFI via Apptainer + calls `ScannerSource.push_vsend`. Progress = MURFI log line count.
-- `DicomStepExecutor`: launches MURFI + DICOM receiver + calls `ScannerSource.push_dicom`. Progress = DICOM receiver file count.
-- `NfRunStepExecutor`: wraps VsendStepExecutor/DicomStepExecutor flow, then launches PsychoPy while MURFI keeps running. Progress has two phases (MURFI, PsychoPy).
-- `FslStageExecutor`: launches an FSL command (fslmerge/melodic/flirt/applywarp). Progress = percent complete (parsed from stderr), or binary done/not-done.
+- `SetupStepExecutor`: runs `orchestration.preflight.run_preflight()` and reports per-check progress. `StepOutcome.succeeded = all(r.passed for r in results)`. No subprocesses, no components. `StepConfig.kind == SETUP`.
+- `VsendStepExecutor`: launches MURFI via Apptainer, then calls `ScannerSource.push_vsend()`. Progress unit = "volumes", target = 2. Components = `("murfi",)`.
+- `DicomStepExecutor`: launches MURFI + DICOM receiver, then calls `ScannerSource.push_dicom()`. Progress unit = "volumes". Components = `("murfi", "dicom")`.
+- `NfRunStepExecutor`: **Phase 1 (MURFI):** same as Dicom/Vsend flow to collect `progress_target` volumes (phase="murfi", unit="volumes"). When target reached, emits a progress update with `detail="Press D to start PsychoPy"` and waits on an internal asyncio.Event set by `advance_phase()`. **Phase 2 (PsychoPy):** launches PsychoPy while MURFI keeps serving activations. PsychoPy's exit is the step's completion signal; scale factor extracted from PsychoPy CSV goes into `StepOutcome.artifacts["scale_factor"]`. Components = `("murfi", "psychopy")`.
+- `FslStageExecutor`: launches one FSL command via subprocess. Progress unit = "percent" (parsed from stderr for MELODIC) or "stages" (binary for simpler commands). Validates on completion that the expected output file exists in `derivatives/`. Components = `()`. The specific subcommands (`fslmerge`, `melodic`, `flirt`, `applywarp`) are dispatched inside the executor based on `StepConfig.fsl_command`.
+
+The "Select sources" step in PROCESS is handled as a SETUP-kind step with interactive selection (not an FSL command): the operator picks which rest runs to include, results stored in `StepOutcome.artifacts["selected_runs"]` for downstream stages to consume.
 
 ### `SessionRunner` (new file: `mindfulness_nf/orchestration/session_runner.py`)
 
@@ -301,20 +327,43 @@ class SessionRunner:
     def select(self, i: int) -> None
 
     # --- Step execution (I/O) -------------------------------------------
-    async def start_current(self) -> None
-        """Construct StepExecutor for the cursor step, wrap `executor.run()`
-        in asyncio.create_task, store as `self._current_task`. Progress
-        callbacks update SessionState; task completion is awaited/checked
-        in a short supervisor coroutine that transitions status on outcome."""
+    async def start_current(self) -> None:
+        """Construct StepExecutor for the cursor step, start its run().
+
+        Refuses (no-op with notification) if another step is currently
+        running (self._current_task exists and is not done). This is the
+        single enforcement point for the "at most one running step"
+        invariant.
+
+        Wraps `executor.run(on_progress)` in asyncio.create_task, stores
+        as self._current_task. A supervisor coroutine awaits the task:
+            • on StepOutcome(succeeded=True) → state.mark_completed
+            • on StepOutcome(succeeded=False) → state.mark_failed(error=...)
+            • on unhandled exception → state.mark_failed(error=traceback),
+              log full trace (programming bug, not operational failure)
+        """
     async def stop_current(self) -> None                # executor.stop()
     async def interrupt_current(self) -> None           # stop + clear data
     async def clear_and_restart_current(self) -> None   # stop + clear + start
 
+    async def advance_phase_current(self) -> None:
+        """Called when operator presses D on a running multi-phase step
+        to proceed past a phase gate (e.g., MURFI → PsychoPy in NF_RUN).
+        Delegates to current executor's `advance_phase()`.
+        No-op if no step is running or step is single-phase."""
+
     # --- Component-level controls (M and P keys) ------------------------
     async def relaunch_component(self, component: str) -> None:
         """Delegates to `self._current_executor.relaunch(component)`.
-        The TUI uses `current_executor.components()` to decide whether
-        M/P keys are visible."""
+
+        Valid only while the current step's status is `running`. On any
+        other status, emits a notification ("M is only valid during a
+        running step") and returns.
+
+        The TUI hides M/P keys unless:
+            state.current.status == RUNNING
+            and component in self.available_components.
+        """
 
     # --- Observability --------------------------------------------------
     def subscribe(self, cb: Callable[[SessionState], None]) -> None
@@ -394,8 +443,14 @@ SessionScreen  ──D──▶  Runner.advance()
                                                 state.mark_failed(cursor, ts, outcome.error)
                                             → persist + notify
 
-on_progress(p: StepProgress)  ──▶  state.set_volumes(cursor, p.value, p.detail, p.phase)
+on_progress(p: StepProgress)  ──▶  state.set_progress(cursor, p.value, p.detail, p.phase)
                                         ├─▶ persist + notify
+
+D key during multi-phase step at phase gate:
+  SessionScreen  ──D──▶  Runner.advance_phase_current()
+                             └─▶ current_executor.advance_phase()
+                                 (executor's internal Event gets set; Phase 2 begins;
+                                  on_progress resumes firing with phase="psychopy")
 
 SessionScreen  ◀── notify(new_state) ── re-renders from new_state
 ```
@@ -408,17 +463,24 @@ The TUI holds no state beyond "the last SessionState I was notified about." All 
 
 ### Keybindings
 
-| Key | Action | Notes |
+Behavior depends on the current step's status.  The TUI help bar shows only keys that are valid right now.
+
+| Key | When valid | Action |
 |---|---|---|
-| `d` | Done / advance | If cursor=pending → start. If cursor=running with ≥expected volumes → complete + move cursor. |
-| `r` | Restart step at cursor | Stop processes if running, clear this step's files, increment attempts, mark pending, then start. |
-| `i` | Interrupt running step | Stop processes cleanly, clear partial data, mark pending. No auto-restart. Cursor unchanged. |
-| `b` / `←` | Back (cursor) | Pure cursor move. Does not touch running step. |
-| `n` / `→` | Next (cursor) | Pure cursor move. |
-| `g` | Go to step # (prompt) | Jump cursor to arbitrary step index. |
-| `m` | (Re)start MURFI | Works whether MURFI is dead or alive. If alive: graceful stop → start. **Does not clear step data** — use `r` for that. On a `failed` step, pressing `m` restarts MURFI and returns the step to `running` (keeping partial volumes). |
-| `p` | (Re)start PsychoPy | Same as `m` but for PsychoPy. Only valid on NF runs. Does not clear data. |
-| `esc` | Quit | Confirms if any process is alive. |
+| `d` | status=pending | Start the step (`runner.start_current()`). |
+| `d` | status=running, `awaiting_advance=True` | Advance phase (`runner.advance_phase_current()`). Cursor unchanged. |
+| `d` | status=running, `awaiting_advance=False` | No-op — completion is automatic when `run()` returns `StepOutcome`. |
+| `d` | status=completed | Move cursor to next step (`runner.advance()`). |
+| `d` | status=failed | No-op. Help bar reads "FAILED — press R to redo or N to skip". |
+| `r` | any status | Restart step at cursor: stop if running, clear this step's files, increment attempts, mark pending, then start. **On status=completed, prompts for confirmation ("Clear and re-run this completed step?").** |
+| `i` | status=running | Interrupt: stop processes cleanly, clear partial data, mark pending. Cursor unchanged. |
+| `i` | any other status | No-op with notification "nothing to interrupt". |
+| `b` / `←` | any | Pure cursor move backward. Never touches the running step. |
+| `n` / `→` | any | Pure cursor move forward. |
+| `g` | any | Prompt for step number; jump cursor. |
+| `m` | status=running AND "murfi" in `executor.components()` | Relaunch MURFI: stop and restart that subprocess only, keep all data, keep progress. |
+| `p` | status=running AND "psychopy" in `executor.components()` | Relaunch PsychoPy: same as `m` but for PsychoPy. |
+| `esc` | any | Quit. If a step is running, first prompts "Stop current run and quit? (Y/N)" — on Y, calls `stop_current()` (marks step failed with error="cancelled"), then exits. |
 
 ### Help bar (contextual)
 
@@ -464,22 +526,25 @@ Bottom of screen shows only the actions that are valid for the current `(step_st
 
 ### Invariants
 
-1. At most one step is `running` at any time. Starting a new step when another is running forces the operator to `i` first; the TUI surfaces this as a status message.
-2. `completed` requires disk validation. `validate_step_data()` confirms volume count before the transition; a mismatch forces `yellow_confirmed` or `failed`.
-3. `clear_and_restart` is transactional. Files removed first, then state updated, then restart. File-removal failures don't touch state.
-4. State persistence is atomic. Temp file + rename (`os.replace`) — already in `subjects.save_session_state`.
-5. `m`/`p` never delete data. Only `r` and `i` touch files.
+1. **At most one step is `running` at any time.**  Enforced by `SessionRunner.start_current()`: if `self._current_task` exists and is not done, start_current refuses (notification-only, no exception).  This is the single enforcement point.
+2. **`completed` requires per-kind validation.**  Validation happens inside each executor's `run()`.  Scan executors assert volume count matches `progress_target`.  FslStageExecutor asserts the expected output file exists in `derivatives/`.  SetupStepExecutor asserts all preflight checks passed.  The runner trusts `StepOutcome.succeeded` — it does not re-validate.
+3. **`clear_and_restart` is transactional.**  Files removed first, then state updated, then restart.  File-removal failures don't touch state.
+4. **State persistence is atomic.**  Temp file + rename (`os.replace`) — already implemented in `subjects.save_session_state`.
+5. **`m`/`p` never delete data.**  Only `r` and `i` touch files.  `m`/`p` are valid only while status=`running`.
+6. **Programming errors become failed steps with traces.**  The supervisor coroutine catches unhandled exceptions from `executor.run()`, logs full trace to MURFI-log-style file, and calls `state.mark_failed(error="internal error: ...")`. The runner itself does not crash; the operator sees a failed step and can press R.
+7. **Cursor cannot point outside `steps`.**  `select(i)` clamps to `[0, len(steps))`.  `advance()` at the last step marks the session complete; `go_back()` at index 0 is a no-op.
 
 ## Resume behavior
 
 On `SessionRunner.load_or_create`:
 
 1. Look for `<subject_dir>/<session_dir>/session_state.json`.
-2. If missing, build a fresh `SessionState` from `SESSION_CONFIGS[session_type]`.
+2. If missing, build a fresh `SessionState` from `SESSION_CONFIGS[session_type]` and the current code's step configs.
 3. If present:
-   - Parse JSON.
-   - For each step with `status=running`, set `status=failed` (the process that was running is gone).
-   - Construct `SessionState`, set `updated_at=now`, persist.
+   - Parse JSON. If `schema_version` is unknown, surface a clear error and refuse to load (operator can delete the file to start fresh).
+   - For each step with `status=running`, set `status=failed` with `detail_message="interrupted by restart"` (the process that was running is gone; we don't know if partial data on disk is valid).
+   - Partial `.nii` files from the interrupted step are **left on disk**. The operator can inspect them; pressing `r` clears them. Automatic clearing on resume would be surprising.
+   - Construct `SessionState` from the JSON's **persisted step configs** (not from `SESSION_CONFIGS` — self-contained resume, robust to code drift). Set `updated_at=now`, persist.
 4. Render TUI from state. Operator lands on the recorded cursor.
 
 **No confirmation prompt.** Resume is implicit when `(subject_id, session_type)` already has state; the operator can press `r` to clear any specific step, or delete the directory to start fully over. Rationale: fewer interactive prompts = fewer brittle paths.
@@ -488,11 +553,11 @@ On `SessionRunner.load_or_create`:
 
 `uv run mindfulness-nf --dry-run [--subject <id>]`:
 
-- `ScannerSource` → `SimulatedScannerSource` pointing at `subjects/sub-test/sourcedata/murfi/img/`.
+- `ScannerSource` → `SimulatedScannerSource` pointing at `murfi/dry_run_cache/` (**new dedicated directory, sibling of `murfi/subjects/`, gitignored**). The cache is populated once from a real session's `sourcedata/murfi/img/` via `scripts/populate_dry_run_cache.py <source_session_dir>`. If the cache is missing, the TUI refuses to start dry-run with a clear error telling the operator to run the populate script first.
 - Subject dir defaults to `subjects/sub-dry-run/` but `--subject` can override.
 - MURFI and PsychoPy launch normally (via Apptainer + python subprocess). The TUI does not know it is in dry-run mode.
 
-This enables rehearsal of every protocol, crash recovery, resume, interrupt, navigation, and M/P restart without a scanner.
+This enables rehearsal of every protocol, crash recovery, resume, interrupt, navigation, and M/P relaunch without a scanner. Note: the cache location is deliberately NOT inside `subjects/`, so a blanket `rm -rf subjects/sub-*/` doesn't destroy dry-run capability.
 
 ## Testing — the executable guarantee
 
@@ -509,7 +574,7 @@ def test_advance_on_running_at_threshold_completes(): ...
 def test_go_back_does_not_change_status(): ...
 def test_select_out_of_range_noop(): ...
 def test_clear_current_increments_attempts(): ...
-def test_clear_current_resets_received_volumes(): ...
+def test_clear_current_resets_progress_to_zero(): ...
 def test_clear_current_does_not_touch_other_steps(): ...
 def test_mark_failed_from_running_only(): ...
 def test_cursor_and_running_can_diverge(): ...
@@ -534,15 +599,24 @@ def runner(tmp_path):
     )  # _executor_for overridden in tests to return FakeStepExecutor
 
 async def test_start_current_transitions_pending_to_running(runner): ...
-async def test_volume_update_persists_to_json(runner): ...
-async def test_completed_requires_disk_validation(runner, tmp_path): ...
-async def test_murfi_crash_marks_step_failed(runner): ...
-async def test_restart_murfi_keeps_step_running_if_volumes_still_come(runner): ...
+async def test_start_current_refuses_when_another_step_running(runner): ...
+async def test_progress_update_persists_to_json(runner): ...
+async def test_completed_requires_per_kind_validation(runner, tmp_path): ...
+async def test_murfi_crash_marks_step_failed_with_error_message(runner): ...
+async def test_programming_error_in_run_becomes_failed_step_with_trace(runner): ...
+async def test_relaunch_murfi_keeps_progress_if_running(runner): ...
+async def test_relaunch_murfi_rejected_on_failed_step(runner): ...
+async def test_relaunch_psychopy_rejected_on_vsend_step(runner): ...
+async def test_advance_phase_signals_executor(runner): ...
+async def test_advance_phase_is_noop_on_single_phase_executor(runner): ...
 async def test_interrupt_clears_partial_nii_files(runner, tmp_path): ...
 async def test_clear_and_restart_increments_attempts(runner): ...
 async def test_state_persisted_atomically_after_every_transition(runner): ...
 async def test_load_or_create_coerces_running_to_failed(runner, tmp_path): ...
 async def test_load_or_create_preserves_cursor(runner, tmp_path): ...
+async def test_load_or_create_rejects_unknown_schema_version(runner, tmp_path): ...
+async def test_resume_uses_persisted_step_configs_not_current(runner, tmp_path): ...
+async def test_resume_leaves_partial_data_on_disk(runner, tmp_path): ...
 async def test_navigating_while_running_does_not_stop_process(runner): ...
 ```
 
@@ -591,15 +665,35 @@ async def test_manual_psychopy_restart_via_p_key():
 
 async def test_m_key_does_not_delete_partial_volumes():
     """Start a step, produce 50 .nii files, press M, verify all 50
-    files still on disk and received_volumes==50 in state."""
+    files still on disk and progress_current==50 in state."""
 
 async def test_r_key_deletes_partial_volumes_and_increments_attempts():
     """Start a step, produce 50 .nii files, press R, verify files gone,
-    received_volumes==0, attempts incremented."""
+    progress_current==0, attempts incremented."""
 
-async def test_m_on_failed_step_returns_to_running():
+async def test_m_on_failed_step_is_rejected_with_notification():
     """Simulate MURFI crash at 50 volumes → status=failed. Press M;
-    verify MURFI relaunches, step returns to running, 50 volumes kept."""
+    verify M is rejected with 'only valid during running step'; use R instead."""
+
+async def test_r_on_completed_step_prompts_confirmation():
+    """Complete Feedback 1. Navigate back to it. Press R. Verify a
+    confirmation dialog appears. On Yes: data cleared, status=pending, restart.
+    On No: no changes."""
+
+async def test_escape_mid_run_prompts_and_marks_cancelled():
+    """Start Feedback 2 (running). Press Escape. Verify prompt 'Stop and quit?'
+    On Yes: executor.stop() called, step marked failed with error='cancelled',
+    state persisted, TUI exits."""
+
+async def test_advance_phase_triggers_psychopy_launch_in_nf_run():
+    """Start Feedback 2. Let MURFI phase reach 150/150 volumes. Verify
+    on_progress reports detail='Press D to start PsychoPy'. Press D.
+    Verify PsychoPy subprocess launches and MURFI keeps running."""
+
+async def test_advance_phase_before_murfi_complete_is_ignored():
+    """Start Feedback 2. At 50/150 volumes, press D. Verify advance_phase
+    was called but executor's internal guard ignores it (MURFI phase not
+    yet done). Progress continues as normal."""
 
 async def test_rt30_session_uses_all_13_feedback_phase_runs():
     """Assert RT30 config exposes exactly 15 steps (Setup, 2vol,

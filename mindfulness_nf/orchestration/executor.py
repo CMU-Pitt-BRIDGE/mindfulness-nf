@@ -75,6 +75,28 @@ Design decisions locked in
    enumerate: PsychoPy's scale factor, FSL mask paths, MELODIC component
    indices, etc.  The runner stores these in `StepState` for display and
    for downstream steps to read.
+
+10. **Multi-phase steps use `advance_phase()`.**  Some steps have internal
+   phases where the operator must acknowledge completion of one phase
+   before the next begins — notably NF_RUN, where MURFI finishes collecting
+   150 volumes and the operator presses D to launch PsychoPy.  The runner
+   calls `advance_phase()` on that D press; the executor transitions
+   internally.  For single-phase executors this is a no-op.  Distinct
+   from `SessionRunner.advance()`, which moves the *cursor* between steps.
+
+11. **M/P (relaunch) is restricted to `running` state.**  Relaunching a
+   component on a `failed` step would require reconstructing executor
+   state over partial data — complex and error-prone.  Instead: on
+   `failed`, only R (clear + restart) is offered.  TUI gates M/P by
+   checking both `components()` and the current step's status.
+
+12. **No yellow-confirm force-complete.**  The old TUI let the operator
+   force-advance a partial scan (e.g., 148/150 volumes) by double-pressing
+   D.  The new design removes this: if the scanner delivers fewer volumes
+   than expected, the step fails and the operator presses R to retry.
+   This keeps the state machine simpler and tests deterministic.  If
+   operations prove this is too strict, a follow-up can add
+   `force_complete()` as a Protocol method.
 """
 
 from __future__ import annotations
@@ -106,8 +128,10 @@ class StepProgress:
         Scanner-paced:  value=87, target=150, unit="volumes"
         FSL stage:      value=63, target=100, unit="percent", detail="MELODIC: dim estimation"
         Binary stage:   value=0|1, target=1, unit="stages"
-        NF_RUN phases:  (phase="murfi",  value=150, target=150, unit="volumes")
-                    →   (phase="psychopy", value=0, target=1,   unit="stages", detail="task running")
+        NF_RUN at gate: phase="murfi", value=150, target=150, unit="volumes",
+                        awaiting_advance=True, detail="Press D to start PsychoPy"
+        NF_RUN phase 2: phase="psychopy", value=0, target=1, unit="stages",
+                        detail="PsychoPy running", awaiting_advance=False
 
     The UI resets its progress bar when `phase` changes between updates.
     """
@@ -117,6 +141,7 @@ class StepProgress:
     unit: ProgressUnit
     phase: Phase | None = None
     detail: str | None = None
+    awaiting_advance: bool = False  # True iff next phase requires `advance_phase()`
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +228,20 @@ class StepExecutor(Protocol):
             SetupStepExecutor  → ()
 
         Non-async, zero-side-effect — safe to call any time.
+        """
+
+    def advance_phase(self) -> None:
+        """Signal this executor to advance past a phase gate.
+
+        For multi-phase executors (NF_RUN: MURFI → PsychoPy), this is how
+        the runner tells the executor "operator pressed D, proceed to the
+        next phase".  For single-phase executors (Vsend, Dicom, FslStage,
+        Setup), this is a no-op.
+
+        Synchronous (sets an internal flag or event).  Safe to call
+        multiple times; only the first call in each phase takes effect.
+        Does NOT complete the step — the step completes only when `run()`
+        returns its `StepOutcome`.
         """
 
 

@@ -35,29 +35,29 @@ This is a significant refactor (~800–1200 LOC changed) but the risk is bounded
 └──────────────────────┬──────────────────────────┘
                        │ intents
                        │ advance / go_back / select_step
-                       │ clear_current / restart_murfi / restart_psychopy
+                       │ clear_current / relaunch_component
                        │ interrupt
 ┌──────────────────────▼──────────────────────────┐
 │ SessionRunner   (orchestration/session_runner)  │
 │  ─ IMPERATIVE SHELL ────────────────────────────│
-│  • owns MURFI / PsychoPy / DICOM process handles│
-│  • watches disk (MURFI log, func/*.nii) and     │
-│    calls pure core on each event                │
+│  • dispatches StepKind → StepExecutor           │
+│  • awaits asyncio.Task for current executor     │
 │  • persists SessionState after every transition │
 │  • swaps ScannerSource: Real vs Simulated       │
 └──┬─────────────────────┬────────────────────┬───┘
    │                     │                    │
-┌──▼──────────────┐ ┌────▼──────────┐ ┌──────▼──────────┐
-│ SessionState    │ │ ProcessGroup  │ │ ScannerSource   │
-│ (models.py,     │ │ (supervisor)  │ │ Protocol:       │
-│  frozen, pure)  │ │ • murfi_proc  │ │  • push_vsend() │
-│ • steps[]       │ │ • psypy_proc  │ │  • push_dicom() │
-│ • cursor        │ │ • dicom_proc  │ │ Real | Simulated│
-│ • status per    │ │ • restart_*() │ │                 │
-│   step (pending │ │ • is_alive()  │ │                 │
-│   running, done,│ │ • health_task │ │                 │
-│   failed)       │ │               │ │                 │
-└─────────────────┘ └───────────────┘ └─────────────────┘
+┌──▼──────────────┐ ┌────▼──────────────┐ ┌──▼──────────────┐
+│ SessionState    │ │ StepExecutor      │ │ ScannerSource   │
+│ (models.py,     │ │ (Protocol)        │ │ Protocol:       │
+│  frozen, pure)  │ │ • run() → Outcome │ │  • push_vsend() │
+│ • steps[]       │ │ • stop()          │ │  • push_dicom() │
+│ • cursor        │ │ • relaunch(comp)  │ │ Real | Simulated│
+│ • status per    │ │ • components()    │ │                 │
+│   step (pending │ │                   │ │                 │
+│   running, done,│ │ Concrete: Setup,  │ │                 │
+│   failed)       │ │ Vsend, Dicom,     │ │                 │
+│                 │ │ NfRun, FslStage   │ │                 │
+└─────────────────┘ └───────────────────┘ └─────────────────┘
 ```
 
 ### Properties
@@ -146,29 +146,33 @@ class StepStatus(enum.Enum):
     FAILED = "failed"
 
 class StepKind(enum.Enum):
-    SETUP = "setup"          # preflight-only; no MURFI/DICOM
-    VSEND_SCAN = "vsend"     # 2vol calibration via vSend
-    DICOM_SCAN = "dicom"     # resting state via DICOM receiver
-    NF_RUN = "nf_run"        # feedback/transfer runs (MURFI + PsychoPy)
+    SETUP = "setup"              # preflight-only; no MURFI/DICOM
+    VSEND_SCAN = "vsend"         # 2vol calibration via vSend
+    DICOM_SCAN = "dicom"         # resting state via DICOM receiver
+    NF_RUN = "nf_run"            # feedback/transfer runs (MURFI + PsychoPy)
+    PROCESS_STAGE = "process"    # FSL pipeline stage (fslmerge, MELODIC, flirt, ...)
 
 @dataclass(frozen=True, slots=True)
 class StepConfig:
     name: str
     task: str | None             # BIDS task label, e.g., "feedback"
-    run: int | None              # BIDS run number, 1-indexed
-    expected_volumes: int
-    xml_name: str | None         # MURFI template, e.g., "rtdmn.xml"
+    run: int | None              # BIDS run number, 1-indexed (None for PROCESS_STAGE)
+    progress_target: int         # scans: expected volume count; compute: 100 (%) or 1 (done)
+    progress_unit: str           # "volumes" | "percent" | "stages"
+    xml_name: str | None         # MURFI template, e.g., "rtdmn.xml" (None for PROCESS_STAGE)
     kind: StepKind
     feedback: bool = False       # only relevant for NF_RUN
+    fsl_command: str | None = None   # only relevant for PROCESS_STAGE
 
 @dataclass(frozen=True, slots=True)
 class StepState:
     config: StepConfig
     status: StepStatus = StepStatus.PENDING
     attempts: int = 0
-    received_volumes: int = 0
+    progress_current: int = 0    # scans: received volumes; compute: percent/stage idx
     last_started: str | None = None   # ISO-8601 UTC
     last_finished: str | None = None
+    detail_message: str | None = None    # e.g., "MELODIC stage 3/8 — dimension estimation"
 
 @dataclass(frozen=True, slots=True)
 class SessionState:
@@ -236,20 +240,44 @@ RT30: tuple[StepConfig, ...] = (
 )
 # RT30 has 15 steps: Setup, 2vol, TransferPre, Fb1-5, TransferPost1, Fb6-10, TransferPost2.
 
+PROCESS: tuple[StepConfig, ...] = (
+    StepConfig("Setup",          None,        None, 0,   "none",    None, StepKind.SETUP),
+    StepConfig("Select sources", "select",    None, 1,   "stages",  None, StepKind.PROCESS_STAGE, fsl_command="select_runs"),
+    StepConfig("Merge rests",    "merge",     None, 100, "percent", None, StepKind.PROCESS_STAGE, fsl_command="fslmerge"),
+    StepConfig("MELODIC ICA",    "melodic",   None, 100, "percent", None, StepKind.PROCESS_STAGE, fsl_command="melodic"),
+    StepConfig("Extract DMN",    "dmn_mask",  None, 100, "percent", None, StepKind.PROCESS_STAGE, fsl_command="extract_dmn"),
+    StepConfig("Extract CEN",    "cen_mask",  None, 100, "percent", None, StepKind.PROCESS_STAGE, fsl_command="extract_cen"),
+    StepConfig("Register",       "register",  None, 100, "percent", None, StepKind.PROCESS_STAGE, fsl_command="flirt_applywarp"),
+    StepConfig("QC",             "qc",        None, 1,   "stages",  None, StepKind.PROCESS_STAGE, fsl_command="qc_visualize"),
+)
+
 SESSION_CONFIGS: dict[str, tuple[StepConfig, ...]] = {
-    "loc3": LOC3, "rt15": RT15, "rt30": RT30,
+    "loc3": LOC3, "rt15": RT15, "rt30": RT30, "process": PROCESS,
 }
 ```
 
-Exact step counts and BIDS naming derived from `materials/mri_sequences/LOC3.pdf`, `RT15.pdf`, `RT30.pdf`.
+Exact step counts and BIDS naming derived from `materials/mri_sequences/LOC3.pdf`, `RT15.pdf`, `RT30.pdf`. The `PROCESS` pipeline mirrors the existing `orchestration/ica.py` stages.
 
 ## Components
+
+### `StepExecutor` protocol (new file: `mindfulness_nf/orchestration/executor.py`)
+
+Every step kind (VSEND_SCAN, DICOM_SCAN, NF_RUN, PROCESS_STAGE) is handled by an implementation of the same `StepExecutor` protocol. `SessionRunner` stays kind-agnostic: it dispatches to the right executor based on `StepConfig.kind`. This is what lets Process, Localizer, RT15, and RT30 share one orchestration framework.
+
+**The Protocol signature is designed collaboratively below** (see "Design sketch: StepExecutor" annex — `mindfulness_nf/orchestration/executor.py`).
+
+Concrete implementations:
+
+- `VsendStepExecutor`: launches MURFI via Apptainer + calls `ScannerSource.push_vsend`. Progress = MURFI log line count.
+- `DicomStepExecutor`: launches MURFI + DICOM receiver + calls `ScannerSource.push_dicom`. Progress = DICOM receiver file count.
+- `NfRunStepExecutor`: wraps VsendStepExecutor/DicomStepExecutor flow, then launches PsychoPy while MURFI keeps running. Progress has two phases (MURFI, PsychoPy).
+- `FslStageExecutor`: launches an FSL command (fslmerge/melodic/flirt/applywarp). Progress = percent complete (parsed from stderr), or binary done/not-done.
 
 ### `SessionRunner` (new file: `mindfulness_nf/orchestration/session_runner.py`)
 
 ```python
 class SessionRunner:
-    """Coordinates SessionState with MURFI/PsychoPy/DICOM/scanner."""
+    """Coordinates SessionState with step executors and scanner source."""
 
     def __init__(
         self,
@@ -258,7 +286,6 @@ class SessionRunner:
         pipeline: PipelineConfig,
         scanner_config: ScannerConfig,
         scanner_source: ScannerSource,        # Real | Simulated
-        process_group: ProcessGroup | None = None,
     ) -> None: ...
 
     @classmethod
@@ -275,49 +302,45 @@ class SessionRunner:
 
     # --- Step execution (I/O) -------------------------------------------
     async def start_current(self) -> None
-    async def stop_current(self) -> None
-    async def interrupt_current(self) -> None         # stop + clear
-    async def clear_and_restart_current(self) -> None # stop + clear + start
+        """Construct StepExecutor for the cursor step, wrap `executor.run()`
+        in asyncio.create_task, store as `self._current_task`. Progress
+        callbacks update SessionState; task completion is awaited/checked
+        in a short supervisor coroutine that transitions status on outcome."""
+    async def stop_current(self) -> None                # executor.stop()
+    async def interrupt_current(self) -> None           # stop + clear data
+    async def clear_and_restart_current(self) -> None   # stop + clear + start
 
-    # --- Process-level controls -----------------------------------------
-    async def restart_murfi(self) -> None
-    async def restart_psychopy(self) -> None
-    async def stop_all(self) -> None
+    # --- Component-level controls (M and P keys) ------------------------
+    async def relaunch_component(self, component: str) -> None:
+        """Delegates to `self._current_executor.relaunch(component)`.
+        The TUI uses `current_executor.components()` to decide whether
+        M/P keys are visible."""
 
     # --- Observability --------------------------------------------------
     def subscribe(self, cb: Callable[[SessionState], None]) -> None
     @property
     def state(self) -> SessionState
+    @property
+    def available_components(self) -> tuple[str, ...]:
+        """Pass-through to current executor's components() or ()."""
 
     # --- Internals ------------------------------------------------------
+    def _executor_for(self, step: StepConfig) -> StepExecutor:
+        """Dispatch on StepKind to the right concrete executor,
+        passing all required deps (scanner_source, configs, subject_dir)."""
     def _apply(self, new_state: SessionState) -> None:
         """Atomic: persist JSON, update self._state, notify subscribers."""
 ```
 
-### `ProcessGroup` (new file: `mindfulness_nf/orchestration/process_group.py`)
+### Subprocess ownership — per-executor, not a central `ProcessGroup`
 
-```python
-class ManagedProcess:
-    name: str
-    process: asyncio.subprocess.Process | None
-    log_path: Path
-    launched_at: float | None
+Each concrete executor owns any subprocesses it launches. The runner never holds subprocess handles directly. This means:
 
-    async def start(self) -> None: ...
-    async def stop(self, timeout: float = 5.0) -> None: ...   # SIGTERM → SIGKILL
-    def is_alive(self) -> bool: ...
-    def returncode(self) -> int | None: ...
-    async def wait(self) -> int: ...
+- **No central health-poll task.** The executor's `run()` coroutine detects its own subprocess exits (via `await process.wait()` or similar) and returns `StepOutcome(succeeded=False, error="MURFI exited 1")` accordingly. The runner simply `await`s the `asyncio.Task` wrapping `run()` and checks `task.done()` / `task.result()` — reusing asyncio's built-in machinery rather than mirroring it.
+- **M/P keys go through `relaunch(component)`.** The runner's `relaunch_murfi()` / `relaunch_psychopy()` methods delegate to `current_executor.relaunch("murfi" | "psychopy")`. The executor knows how to stop and restart only the named subprocess while keeping progress intact.
+- **Shutdown is one call.** `await runner.stop_current()` calls `current_executor.stop()`, which teardowns everything the executor launched.
 
-class ProcessGroup:
-    murfi: ManagedProcess
-    psychopy: ManagedProcess | None
-    dicom: ManagedProcess | None
-
-    def health_check_task(self, on_unexpected_exit: Callable[[str, int], None]) -> asyncio.Task:
-        """Poll returncodes every 0.5s. On unexpected non-None returncode
-        while step is expected-running, call on_unexpected_exit(name, rc)."""
-```
+A small `ManagedProcess` helper (a thin wrapper around `asyncio.subprocess.Process` with SIGTERM→SIGKILL semantics) lives in `orchestration/_process.py` and is used inside each executor. It is NOT part of the SessionRunner's public surface.
 
 ### `ScannerSource` (new file: `mindfulness_nf/orchestration/scanner_source.py`)
 
@@ -359,20 +382,25 @@ SessionScreen  ──D──▶  Runner.advance()
                            │
                            └─▶ Runner.start_current()
                                     │
-                                    ├─▶ state.mark_running(cursor, ts)
-                                    ├─▶ persist + notify
-                                    ├─▶ murfi.configure_moco(...)
-                                    ├─▶ process_group.murfi.start()
-                                    └─▶ scanner_source.push_dicom(...)
+                                    ├─▶ executor = Runner._executor_for(step)
+                                    ├─▶ state.mark_running(cursor, ts) + persist + notify
+                                    ├─▶ task = asyncio.create_task(
+                                    │         executor.run(on_progress=Runner._on_progress))
+                                    └─▶ supervisor coroutine awaits task:
+                                            outcome = await task
+                                            if outcome.succeeded:
+                                                state.mark_completed(cursor, ts, outcome.artifacts)
+                                            else:
+                                                state.mark_failed(cursor, ts, outcome.error)
+                                            → persist + notify
 
-VolumeWatcher (bg task)  ──▶  Runner.set_volumes(i, n)  ──▶  state.set_volumes()
-                                                              ├─▶ persist + notify
-ProcessHealthWatcher     ──▶  Runner._on_unexpected_exit(name)
-                                                              ├─▶ state.mark_failed()
-                                                              └─▶ persist + notify
+on_progress(p: StepProgress)  ──▶  state.set_volumes(cursor, p.value, p.detail, p.phase)
+                                        ├─▶ persist + notify
 
 SessionScreen  ◀── notify(new_state) ── re-renders from new_state
 ```
+
+The runner does not run a separate health-poll task. The executor's `run()` coroutine detects subprocess exits internally and returns `StepOutcome(succeeded=False, error=...)`, which the supervisor coroutine converts to `mark_failed`.
 
 The TUI holds no state beyond "the last SessionState I was notified about." All UI updates are a function of the received state.
 
@@ -405,8 +433,8 @@ Bottom of screen shows only the actions that are valid for the current `(step_st
 
 **A. MURFI dies mid-scan at vol 50/150 of Feedback 2.**
 
-- `ProcessHealthWatcher` sees `returncode != 0`.
-- Runner: `state.mark_failed(idx)`, stops PsychoPy if running, persists, notifies.
+- Executor's `run()` sees the MURFI subprocess exit with non-zero returncode, returns `StepOutcome(succeeded=False, error="MURFI exited 1")`.
+- Runner's supervisor coroutine awaits the task, receives the outcome, calls `state.mark_failed(idx)`, persists, notifies.
 - TUI: *"Feedback 2 FAILED — MURFI exited at vol 50/150. Press R to clear & restart, M to relaunch MURFI only, → to skip."*
 - Operator presses `r` → runner clears step files, increments `attempts`, marks pending, starts fresh.
 
@@ -494,7 +522,7 @@ def test_invariants_hold_over_random_sequences(ops): ...
 
 ### Layer 2 — Runner with mocked processes (`tests/test_session_runner.py`)
 
-Medium speed; uses a `FakeProcessGroup` that simulates MURFI/PsychoPy behavior without launching real subprocesses.
+Medium speed; injects a `FakeStepExecutor` (or uses a real concrete executor with a `NoOpScannerSource`) that simulates subprocess behavior without launching real processes. `SessionRunner._executor_for` is monkey-patched in tests to return the fake.
 
 ```python
 @pytest.fixture
@@ -503,8 +531,7 @@ def runner(tmp_path):
         state=fresh_state("rt15", tmp_path),
         subject_dir=tmp_path,
         scanner_source=NoOpScannerSource(),
-        process_group=FakeProcessGroup(),
-    )
+    )  # _executor_for overridden in tests to return FakeStepExecutor
 
 async def test_start_current_transitions_pending_to_running(runner): ...
 async def test_volume_update_persists_to_json(runner): ...
@@ -521,7 +548,7 @@ async def test_navigating_while_running_does_not_stop_process(runner): ...
 
 ### Layer 3 — End-to-end with Textual test harness and real-ish subprocesses (`tests/test_e2e_session.py`)
 
-Slow (~seconds each), uses Textual's `App.run_test()` and the `SimulatedScannerSource`. Real MURFI and real PsychoPy are *not* required for these tests — they use a `FakeMurfiProcess` that writes a real-format MURFI log on disk and a `FakePsychoPyProcess` that writes a real-format CSV. This keeps the tests CI-runnable while still exercising the TUI + Runner + ProcessGroup + VolumeWatcher stack end-to-end.
+Slow (~seconds each), uses Textual's `App.run_test()` and the `SimulatedScannerSource`. Real MURFI and real PsychoPy are *not* required for these tests — they use a `FakeMurfiProcess` that writes a real-format MURFI log on disk and a `FakePsychoPyProcess` that writes a real-format CSV. This keeps the tests CI-runnable while still exercising the TUI + Runner + StepExecutor chain end-to-end.
 
 Every item from the operator checklist becomes a test. Naming convention: one test per row of the checklist.
 
@@ -599,13 +626,26 @@ async def test_validate_step_data_catches_missing_volumes():
 async def test_migrate_or_fresh_is_chosen_by_directory_presence():
     """No session_state.json → fresh state. With session_state.json
     → load state. Never a mix."""
+
+async def test_process_session_runs_all_fsl_stages():
+    """Golden path: dry-run PROCESS session from Setup through QC,
+    all stages green, derivatives/masks/{DMN,CEN}.nii created."""
+
+async def test_process_melodic_failure_marks_stage_failed():
+    """Simulate FSL MELODIC exiting with non-zero return code.
+    Verify stage=failed, R clears intermediate outputs and restarts."""
+
+async def test_process_resume_skips_completed_stages():
+    """Start PROCESS, complete Merge + MELODIC, force-quit. Resume;
+    verify cursor lands at Extract DMN, prior stages stay completed,
+    no re-run of MELODIC."""
 ```
 
 ### Test doubles
 
 - `FakeMurfiProcess`: a coroutine-backed fake that writes `log/murfi.log` with real MURFI log lines at a configurable cadence. Exposes `simulate_crash(exit_code)` and `simulate_volume(n)`.
 - `FakePsychoPyProcess`: writes a real PsychoPy CSV including scale factor. Exposes `simulate_crash()`, `simulate_complete()`.
-- `FakeProcessGroup`: wraps the two fakes with the same interface as `ProcessGroup`.
+- `FakeStepExecutor`: implements the `StepExecutor` Protocol. Drives fake `run()` lifecycle for tests: `simulate_volume(n)`, `simulate_crash(exit_code)`, `simulate_phase_change("psychopy")`. Supports `relaunch(component)` tracking.
 - `NoOpScannerSource`: does nothing (used when the fakes simulate volumes directly).
 - `SimulatedScannerSource` (the real dry-run implementation): pushes from a cache directory; also used in L3 tests.
 
@@ -629,6 +669,6 @@ Existing test subjects (`sub-002`, `sub-3421`, `sub-kym`, `sub-test`) contain no
 
 ## Out of scope
 
-- Retro-fitting `Process` session screen (ICA/FEAT pipeline) into the SessionRunner framework. It stays as a separate screen for now. Its data outputs will land in `derivatives/masks/` per BIDS, but its state machine is simpler and not the source of the stakeholder-trust problem.
 - A post-hoc BIDS validator. The layout is BIDS-shaped but we are not going to run bids-validator as part of CI in this iteration.
 - Multi-subject parallelism. One subject, one session, one TUI instance.
+- Retro-fitting the subject-entry and session-select screens into a single unified routing model. They stay as they are (`subject_entry.py`, `session_select.py`), though the session-select list gains a `process` option.

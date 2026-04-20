@@ -165,13 +165,15 @@ class StepKind(enum.Enum):
     NF_RUN = "nf_run"            # feedback/transfer runs (MURFI + PsychoPy)
     PROCESS_STAGE = "process"    # FSL pipeline stage (fslmerge, MELODIC, flirt, ...)
 
+ProgressUnit = Literal["volumes", "percent", "stages"]   # (mirrors executor.py)
+
 @dataclass(frozen=True, slots=True)
 class StepConfig:
     name: str
     task: str | None             # BIDS task label, e.g., "feedback"
     run: int | None              # BIDS run number, 1-indexed (None for PROCESS_STAGE)
     progress_target: int         # scans: expected volume count; compute: 100 (%) or 1 (done)
-    progress_unit: str           # "volumes" | "percent" | "stages"
+    progress_unit: ProgressUnit  # "volumes" | "percent" | "stages"
     xml_name: str | None         # MURFI template, e.g., "rtdmn.xml" (None for PROCESS_STAGE)
     kind: StepKind
     feedback: bool = False       # only relevant for NF_RUN
@@ -185,7 +187,8 @@ class StepState:
     progress_current: int = 0            # scans: received volumes; compute: percent/stage idx
     last_started: str | None = None      # ISO-8601 UTC
     last_finished: str | None = None
-    detail_message: str | None = None    # e.g., "MELODIC stage 3/8 — dimension estimation"
+    detail_message: str | None = None    # progress narration, e.g. "MELODIC dim estimation"
+    error: str | None = None             # set only when status=failed; short operator-readable reason
     phase: str | None = None             # "murfi" | "psychopy" for NF_RUN mid-step
     awaiting_advance: bool = False       # True iff D should call advance_phase_current()
     artifacts: dict[str, Any] | None = None   # executor-specific outputs
@@ -213,6 +216,7 @@ class SessionState:
         self, i: int, value: int,
         detail: str | None = None,
         phase: str | None = None,
+        awaiting_advance: bool = False,
     ) -> SessionState
     @property
     def current(self) -> StepState            # steps[cursor]
@@ -221,6 +225,8 @@ class SessionState:
 ```
 
 ### Session configurations (new file: `mindfulness_nf/sessions.py`)
+
+Configs use keyword arguments throughout to avoid positional mismatches as `StepConfig` evolves.
 
 ```python
 def _feedback_block(start_run: int, count: int = 5) -> tuple[StepConfig, ...]:
@@ -231,7 +237,8 @@ def _feedback_block(start_run: int, count: int = 5) -> tuple[StepConfig, ...]:
             name=f"Feedback {start_run + i}",
             task="feedback",
             run=start_run + i,
-            expected_volumes=150,
+            progress_target=150,
+            progress_unit="volumes",
             xml_name="rtdmn.xml",
             kind=StepKind.NF_RUN,
             feedback=True,
@@ -240,38 +247,57 @@ def _feedback_block(start_run: int, count: int = 5) -> tuple[StepConfig, ...]:
     )
 
 LOC3: tuple[StepConfig, ...] = (
-    StepConfig("Setup",  None,   None, 0,   None,       StepKind.SETUP),
-    StepConfig("Rest 1", "rest", 1,    250, "rest.xml", StepKind.DICOM_SCAN),
-    StepConfig("Rest 2", "rest", 2,    250, "rest.xml", StepKind.DICOM_SCAN),
+    StepConfig(name="Setup",  task=None,   run=None, progress_target=0,
+               progress_unit="stages",  xml_name=None,       kind=StepKind.SETUP),
+    StepConfig(name="Rest 1", task="rest", run=1,    progress_target=250,
+               progress_unit="volumes", xml_name="rest.xml", kind=StepKind.DICOM_SCAN),
+    StepConfig(name="Rest 2", task="rest", run=2,    progress_target=250,
+               progress_unit="volumes", xml_name="rest.xml", kind=StepKind.DICOM_SCAN),
 )
 
 RT15: tuple[StepConfig, ...] = (
-    StepConfig("Setup",          None,           None, 0,   None,        StepKind.SETUP),
-    StepConfig("2-volume",       "2vol",         1,    2,   "2vol.xml",  StepKind.VSEND_SCAN),
-    StepConfig("Transfer Pre",   "transferpre",  1,    150, "rtdmn.xml", StepKind.NF_RUN, feedback=False),
+    StepConfig(name="Setup",         task=None,          run=None, progress_target=0,
+               progress_unit="stages",  xml_name=None,        kind=StepKind.SETUP),
+    StepConfig(name="2-volume",      task="2vol",        run=1,    progress_target=2,
+               progress_unit="volumes", xml_name="2vol.xml",  kind=StepKind.VSEND_SCAN),
+    StepConfig(name="Transfer Pre",  task="transferpre", run=1,    progress_target=150,
+               progress_unit="volumes", xml_name="rtdmn.xml", kind=StepKind.NF_RUN, feedback=False),
     *_feedback_block(start_run=1),   # Feedback 1-5
-    StepConfig("Transfer Post",  "transferpost", 1,    150, "rtdmn.xml", StepKind.NF_RUN, feedback=False),
+    StepConfig(name="Transfer Post", task="transferpost", run=1,   progress_target=150,
+               progress_unit="volumes", xml_name="rtdmn.xml", kind=StepKind.NF_RUN, feedback=False),
 )
 # RT15 has 9 steps: Setup, 2vol, TransferPre, Fb1-5, TransferPost.
 
 RT30: tuple[StepConfig, ...] = (
     *RT15[:-1],                # Setup through Feedback 5
-    StepConfig("Transfer Post 1","transferpost", 1,    150, "rtdmn.xml", StepKind.NF_RUN, feedback=False),
+    StepConfig(name="Transfer Post 1", task="transferpost", run=1, progress_target=150,
+               progress_unit="volumes", xml_name="rtdmn.xml", kind=StepKind.NF_RUN, feedback=False),
     *_feedback_block(start_run=6),   # Feedback 6-10
-    StepConfig("Transfer Post 2","transferpost", 2,    150, "rtdmn.xml", StepKind.NF_RUN, feedback=False),
+    StepConfig(name="Transfer Post 2", task="transferpost", run=2, progress_target=150,
+               progress_unit="volumes", xml_name="rtdmn.xml", kind=StepKind.NF_RUN, feedback=False),
 )
 # RT30 has 15 steps: Setup, 2vol, TransferPre, Fb1-5, TransferPost1, Fb6-10, TransferPost2.
 
+def _fsl_stage(name: str, task: str, fsl_command: str) -> StepConfig:
+    return StepConfig(
+        name=name, task=task, run=None,
+        progress_target=100, progress_unit="percent",
+        xml_name=None, kind=StepKind.PROCESS_STAGE, fsl_command=fsl_command,
+    )
+
 PROCESS: tuple[StepConfig, ...] = (
-    StepConfig("Setup + select", None,        None, 1,   "stages",  None, StepKind.SETUP),
+    StepConfig(name="Setup + select", task=None, run=None, progress_target=1,
+               progress_unit="stages", xml_name=None, kind=StepKind.SETUP),
     # ↑ Interactive: preflight + operator picks which rest runs to process.
     #   Selected run list stored in StepOutcome.artifacts["selected_runs"].
-    StepConfig("Merge rests",    "merge",     None, 100, "percent", None, StepKind.PROCESS_STAGE, fsl_command="fslmerge"),
-    StepConfig("MELODIC ICA",    "melodic",   None, 100, "percent", None, StepKind.PROCESS_STAGE, fsl_command="melodic"),
-    StepConfig("Extract DMN",    "dmn_mask",  None, 100, "percent", None, StepKind.PROCESS_STAGE, fsl_command="extract_dmn"),
-    StepConfig("Extract CEN",    "cen_mask",  None, 100, "percent", None, StepKind.PROCESS_STAGE, fsl_command="extract_cen"),
-    StepConfig("Register",       "register",  None, 100, "percent", None, StepKind.PROCESS_STAGE, fsl_command="flirt_applywarp"),
-    StepConfig("QC",             "qc",        None, 1,   "stages",  None, StepKind.PROCESS_STAGE, fsl_command="qc_visualize"),
+    _fsl_stage("Merge rests", "merge",    fsl_command="fslmerge"),
+    _fsl_stage("MELODIC ICA", "melodic",  fsl_command="melodic"),
+    _fsl_stage("Extract DMN", "dmn_mask", fsl_command="extract_dmn"),
+    _fsl_stage("Extract CEN", "cen_mask", fsl_command="extract_cen"),
+    _fsl_stage("Register",    "register", fsl_command="flirt_applywarp"),
+    StepConfig(name="QC", task="qc", run=None, progress_target=1,
+               progress_unit="stages", xml_name=None, kind=StepKind.PROCESS_STAGE,
+               fsl_command="qc_visualize"),
 )
 
 SESSION_CONFIGS: dict[str, tuple[StepConfig, ...]] = {
@@ -287,7 +313,7 @@ Exact step counts and BIDS naming derived from `materials/mri_sequences/LOC3.pdf
 
 Every step kind (VSEND_SCAN, DICOM_SCAN, NF_RUN, PROCESS_STAGE) is handled by an implementation of the same `StepExecutor` protocol. `SessionRunner` stays kind-agnostic: it dispatches to the right executor based on `StepConfig.kind`. This is what lets Process, Localizer, RT15, and RT30 share one orchestration framework.
 
-**The Protocol signature is designed collaboratively below** (see "Design sketch: StepExecutor" annex — `mindfulness_nf/orchestration/executor.py`).
+The full Protocol definition lives in `mindfulness_nf/orchestration/executor.py`.
 
 Concrete implementations:
 
@@ -386,8 +412,20 @@ class SessionRunner:
 Each concrete executor owns any subprocesses it launches. The runner never holds subprocess handles directly. This means:
 
 - **No central health-poll task.** The executor's `run()` coroutine detects its own subprocess exits (via `await process.wait()` or similar) and returns `StepOutcome(succeeded=False, error="MURFI exited 1")` accordingly. The runner simply `await`s the `asyncio.Task` wrapping `run()` and checks `task.done()` / `task.result()` — reusing asyncio's built-in machinery rather than mirroring it.
-- **M/P keys go through `relaunch(component)`.** The runner's `relaunch_murfi()` / `relaunch_psychopy()` methods delegate to `current_executor.relaunch("murfi" | "psychopy")`. The executor knows how to stop and restart only the named subprocess while keeping progress intact.
-- **Shutdown is one call.** `await runner.stop_current()` calls `current_executor.stop()`, which teardowns everything the executor launched.
+- **M/P keys go through `relaunch(component)`.** The TUI's M key calls `runner.relaunch_component("murfi")`, which delegates to `self._current_executor.relaunch("murfi")`. The executor knows how to stop and restart only the named subprocess while keeping progress intact.
+- **Shutdown is one call.** `await runner.stop_current()` calls `current_executor.stop()`, which tears down everything the executor launched.
+
+### MURFI log handling on relaunch
+
+When `m` relaunches MURFI mid-step, partial volumes are already on disk (good — that's the whole point of M vs R) but the old MURFI's log file lines remain. Without explicit handling, the volume watcher would either double-count (if it re-scans the whole log) or reset to zero (if it starts fresh). Neither is acceptable.
+
+The executor's relaunch policy:
+1. Before stopping old MURFI, record the current log byte offset as `log_baseline`.
+2. Stop old MURFI (graceful, SIGTERM → SIGKILL).
+3. Start new MURFI (appending to the same log).
+4. Volume watcher resumes reading from `log_baseline`. It counts only lines after that offset. The executor keeps `progress_current` continuous — new volumes from the relaunched MURFI continue from the previous count.
+
+This is internal to the executor; neither the Protocol nor SessionRunner need to know.
 
 A small `ManagedProcess` helper (a thin wrapper around `asyncio.subprocess.Process` with SIGTERM→SIGKILL semantics) lives in `orchestration/_process.py` and is used inside each executor. It is NOT part of the SessionRunner's public surface.
 
@@ -436,14 +474,28 @@ SessionScreen  ──D──▶  Runner.advance()
                                     ├─▶ task = asyncio.create_task(
                                     │         executor.run(on_progress=Runner._on_progress))
                                     └─▶ supervisor coroutine awaits task:
-                                            outcome = await task
-                                            if outcome.succeeded:
-                                                state.mark_completed(cursor, ts, outcome.artifacts)
+                                            try:
+                                                outcome = await task
+                                            except Exception as bug:
+                                                # Programming error, not operational:
+                                                log_trace(bug)
+                                                state.mark_failed(cursor, ts,
+                                                    error=f"internal error: {bug!r}")
                                             else:
-                                                state.mark_failed(cursor, ts, outcome.error)
+                                                if outcome.succeeded:
+                                                    state.mark_completed(cursor, ts,
+                                                        artifacts=outcome.artifacts)
+                                                else:
+                                                    state.mark_failed(cursor, ts,
+                                                        error=outcome.error)
                                             → persist + notify
 
-on_progress(p: StepProgress)  ──▶  state.set_progress(cursor, p.value, p.detail, p.phase)
+on_progress(p: StepProgress)  ──▶  state.set_progress(
+                                        cursor, p.value,
+                                        detail=p.detail,
+                                        phase=p.phase,
+                                        awaiting_advance=p.awaiting_advance,
+                                    )
                                         ├─▶ persist + notify
 
 D key during multi-phase step at phase gate:
@@ -474,7 +526,8 @@ Behavior depends on the current step's status.  The TUI help bar shows only keys
 | `d` | status=failed | No-op. Help bar reads "FAILED — press R to redo or N to skip". |
 | `r` | any status | Restart step at cursor: stop if running, clear this step's files, increment attempts, mark pending, then start. **On status=completed, prompts for confirmation ("Clear and re-run this completed step?").** |
 | `i` | status=running | Interrupt: stop processes cleanly, clear partial data, mark pending. Cursor unchanged. |
-| `i` | any other status | No-op with notification "nothing to interrupt". |
+| `i` | status=failed | Clear partial data and mark pending (no restart). Symmetric to the running case; useful when the operator wants to tidy up without immediately retrying. |
+| `i` | status=pending or completed | No-op with notification "nothing to interrupt". |
 | `b` / `←` | any | Pure cursor move backward. Never touches the running step. |
 | `n` / `→` | any | Pure cursor move forward. |
 | `g` | any | Prompt for step number; jump cursor. |
@@ -502,18 +555,21 @@ Bottom of screen shows only the actions that are valid for the current `(step_st
 
 **B. PsychoPy crashes after MURFI phase.**
 
-- Runner stops MURFI too (existing `finally` block behavior), step marked `failed`.
-- TUI: *"Feedback 2 PsychoPy crashed. Press R to restart both, or P to relaunch PsychoPy only."*
+- `NfRunStepExecutor.run()` detects PsychoPy subprocess exit (non-zero code). MURFI is left alive — it was not the cause of the failure, and keeping it serving activations means the operator can relaunch PsychoPy without losing the collected scan.
+- Executor emits a progress update: `detail="PsychoPy crashed — press P to relaunch, R to restart the full run"`, `awaiting_advance=False`. **Step status stays `running`** (MURFI still healthy).
+- TUI: help bar shows `[p] Relaunch PsychoPy`, `[r] Restart step`.
+- Operator presses `p` → `executor.relaunch("psychopy")` → PsychoPy restarts; MURFI unchanged. When PsychoPy completes, the executor stops MURFI, extracts scale factor, returns `StepOutcome(succeeded=True, artifacts={"scale_factor": ...})`.
+- If MURFI also dies while waiting, the executor returns `StepOutcome(succeeded=False, error="MURFI died while awaiting PsychoPy relaunch")`.
 
 **C. Subject squeezes the panic bulb mid-scan.**
 
-- Operator presses `i`. Runner stops MURFI + DICOM + PsychoPy cleanly (SIGTERM → SIGKILL after 5s), clears step files, marks pending.
+- Operator presses `i`. Runner calls `executor.stop()`, which (inside the executor) SIGTERMs every owned subprocess, then SIGKILLs after 5s. Runner then clears step files, marks pending.
 - TUI: *"Feedback 3 interrupted. Data cleared. Press R to redo, → to skip, or Escape to end session."*
 
 **D. MURFI started but no volumes arrive.**
 
-- No automatic detection (scanner timing is operator-driven, false positives would be worse than none).
-- Traffic light stays at `0/150` yellow. Operator chooses `m` (relaunch with different XML), `i` (cancel), or waits.
+- No automatic detection (scanner timing is operator-driven; false positives would be worse than none).
+- Traffic light stays at `0/150` yellow. Operator chooses `m` (relaunch MURFI — useful if the container is in a bad state) or `i` (cancel), or waits.
 
 **E. Operator started wrong step.**
 
@@ -532,7 +588,7 @@ Bottom of screen shows only the actions that are valid for the current `(step_st
 4. **State persistence is atomic.**  Temp file + rename (`os.replace`) — already implemented in `subjects.save_session_state`.
 5. **`m`/`p` never delete data.**  Only `r` and `i` touch files.  `m`/`p` are valid only while status=`running`.
 6. **Programming errors become failed steps with traces.**  The supervisor coroutine catches unhandled exceptions from `executor.run()`, logs full trace to MURFI-log-style file, and calls `state.mark_failed(error="internal error: ...")`. The runner itself does not crash; the operator sees a failed step and can press R.
-7. **Cursor cannot point outside `steps`.**  `select(i)` clamps to `[0, len(steps))`.  `advance()` at the last step marks the session complete; `go_back()` at index 0 is a no-op.
+7. **Cursor cannot point outside `steps`.**  `select(i)` clamps to `[0, len(steps))`.  `advance()` at the last step is a no-op (cursor stays).  `go_back()` at index 0 is a no-op.  Session completion is **derived**, not stored: a session is complete iff `all(s.status == COMPLETED for s in steps)`.  The TUI renders a completion view based on this property; no persistent `session_complete` flag exists.
 
 ## Resume behavior
 
@@ -655,11 +711,12 @@ async def test_back_and_rerun_feedback_1_leaves_feedback_2_3_untouched():
     press R, verify Feedback 1 data cleared and re-running, and
     Feedback 2 & 3 statuses still 'completed'."""
 
-async def test_manual_murfi_restart_via_m_key():
+async def test_manual_murfi_relaunch_via_m_key():
     """Start a step, press M, verify MURFI subprocess PID changes
-    but step status remains running and volume count continues."""
+    but step status remains running and volume count continues via
+    log_baseline offset tracking."""
 
-async def test_manual_psychopy_restart_via_p_key():
+async def test_manual_psychopy_relaunch_via_p_key():
     """In PsychoPy phase, press P, verify PsychoPy process restarts
     and MURFI keeps serving activations."""
 
@@ -713,13 +770,14 @@ async def test_concurrent_running_is_prevented():
     verify an 'interrupt first' message appears and no second process
     launches."""
 
-async def test_validate_step_data_catches_missing_volumes():
+async def test_partial_scan_fails_without_force_complete():
     """Complete a step with only 140/150 .nii files on disk; verify
-    mark_completed either blocks (red) or requires yellow-confirm."""
+    the executor returns StepOutcome(succeeded=False, error=...)
+    and the step is marked failed. Operator must press R to retry."""
 
-async def test_migrate_or_fresh_is_chosen_by_directory_presence():
-    """No session_state.json → fresh state. With session_state.json
-    → load state. Never a mix."""
+async def test_fresh_vs_load_chosen_by_json_presence():
+    """No session_state.json → fresh SessionState from SESSION_CONFIGS.
+    With session_state.json → load and reconstruct from persisted configs."""
 
 async def test_process_session_runs_all_fsl_stages():
     """Golden path: dry-run PROCESS session from Setup through QC,

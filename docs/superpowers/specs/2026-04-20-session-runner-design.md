@@ -136,7 +136,10 @@ The JSON is **self-contained**: it persists the full `StepConfig` for each step 
       "progress_current": 87,
       "last_started": "2026-04-20T14:35:00Z",
       "last_finished": "2026-04-20T14:36:40Z",
-      "detail_message": "MURFI exited 1 at vol 87",
+      "detail_message": null,
+      "error": "MURFI exited 1 at vol 87",
+      "phase": "murfi",
+      "awaiting_advance": false,
       "artifacts": null
     }
   ]
@@ -166,6 +169,7 @@ class StepKind(enum.Enum):
     PROCESS_STAGE = "process"    # FSL pipeline stage (fslmerge, MELODIC, flirt, ...)
 
 ProgressUnit = Literal["volumes", "percent", "stages"]   # (mirrors executor.py)
+Phase = Literal["murfi", "psychopy"]                      # (mirrors executor.py)
 
 @dataclass(frozen=True, slots=True)
 class StepConfig:
@@ -184,12 +188,12 @@ class StepState:
     config: StepConfig
     status: StepStatus = StepStatus.PENDING
     attempts: int = 0
-    progress_current: int = 0            # scans: received volumes; compute: percent/stage idx
+    progress_current: int = 0            # unit=volumes: received; percent: 0-100; stages: 0 or 1
     last_started: str | None = None      # ISO-8601 UTC
     last_finished: str | None = None
-    detail_message: str | None = None    # progress narration, e.g. "MELODIC dim estimation"
+    detail_message: str | None = None    # progress narration during run, e.g. "MELODIC dim estimation"
     error: str | None = None             # set only when status=failed; short operator-readable reason
-    phase: str | None = None             # "murfi" | "psychopy" for NF_RUN mid-step
+    phase: Phase | None = None           # "murfi" | "psychopy" for NF_RUN mid-step (typed alias)
     awaiting_advance: bool = False       # True iff D should call advance_phase_current()
     artifacts: dict[str, Any] | None = None   # executor-specific outputs
 
@@ -358,10 +362,10 @@ class SessionRunner:
         """If session_state.json exists, load and coerce running→failed.
         Otherwise, create a fresh SessionState from SESSION_CONFIGS."""
 
-    # --- Pure navigation (no I/O beyond persisting state) ---------------
-    def advance(self) -> None
-    def go_back(self) -> None
-    def select(self, i: int) -> None
+    # --- Cursor navigation (persists state; no subprocess interaction) ---
+    def advance(self) -> None       # cursor forward; auto-chain start if new is pending
+    def go_back(self) -> None       # cursor back; never touches running step
+    def select(self, i: int) -> None   # jump; never touches running step
 
     # --- Step execution (I/O) -------------------------------------------
     async def start_current(self) -> None:
@@ -677,21 +681,41 @@ Running `pytest -v` must prove that the system handles every scenario in the ope
 Fast, exhaustive, no I/O. These tests run in milliseconds and catch logic regressions at commit time.
 
 ```python
-def test_advance_from_pending_starts_step(): ...
-def test_advance_on_running_below_threshold_noop(): ...
-def test_advance_on_running_at_threshold_completes(): ...
-def test_go_back_does_not_change_status(): ...
-def test_select_out_of_range_noop(): ...
+# SessionState transitions (pure: each returns a new SessionState)
+def test_advance_moves_cursor_forward_by_one(): ...
+def test_advance_at_last_step_is_clamped_noop(): ...
+def test_go_back_moves_cursor_backward_by_one(): ...
+def test_go_back_at_index_zero_is_clamped_noop(): ...
+def test_select_clamps_negative_and_out_of_range(): ...
+def test_cursor_navigation_never_changes_step_status(): ...
+
+# mark_* transitions
+def test_mark_running_sets_status_and_last_started(): ...
+def test_mark_running_refuses_when_another_step_already_running(): ...
+def test_mark_completed_sets_last_finished_and_artifacts(): ...
+def test_mark_completed_clears_prior_error_field(): ...
+def test_mark_failed_from_running_records_error(): ...
+def test_mark_failed_allowed_from_running_only(): ...
+
+# clear_current / set_progress
+def test_clear_current_resets_all_per_attempt_fields(): ...
 def test_clear_current_increments_attempts(): ...
-def test_clear_current_resets_progress_to_zero(): ...
+def test_clear_current_preserves_config(): ...
 def test_clear_current_does_not_touch_other_steps(): ...
-def test_mark_failed_from_running_only(): ...
-def test_cursor_and_running_can_diverge(): ...
-def test_at_most_one_step_running_invariant(): ...
-# Property-based: for arbitrary sequences of pure transitions,
-# invariants hold. (Uses hypothesis.)
-@given(ops=lists(one_of(advance_op, back_op, clear_op, mark_op)))
+def test_set_progress_updates_value_detail_phase_awaiting(): ...
+
+# Invariants as properties
+def test_cursor_and_running_index_can_diverge(): ...
+def test_running_index_is_unique(): ...            # property: ≤ 1 running at a time
+def test_session_complete_derived_from_all_completed(): ...
+
+# Property-based sweeps
+@given(ops=lists(one_of(advance_op, back_op, select_op, clear_op, mark_op, set_progress_op)))
 def test_invariants_hold_over_random_sequences(ops): ...
+# Asserts, after any operation sequence:
+#   - cursor ∈ [0, len(steps))
+#   - at most one step has status=RUNNING
+#   - every field's type matches its declaration (no str slipping into Phase)
 ```
 
 ### Layer 2 — Runner with mocked processes (`tests/test_session_runner.py`)

@@ -102,9 +102,13 @@ class SessionScreen(Screen[None]):
         Binding("r", "rkey", "Restart", show=True),
         Binding("i", "ikey", "Interrupt", show=True),
         Binding("b", "bkey", "Back", show=True),
-        Binding("left", "bkey", show=False),
+        # Arrow keys need priority=True because Textual's scrollable widgets
+        # (LogPanel / RichLog) consume arrow keys for scrolling by default.
+        Binding("up", "bkey", show=False, priority=True),
+        Binding("left", "bkey", show=False, priority=True),
         Binding("n", "nkey", "Next", show=True),
-        Binding("right", "nkey", show=False),
+        Binding("down", "nkey", show=False, priority=True),
+        Binding("right", "nkey", show=False, priority=True),
         Binding("g", "gkey", "Go to", show=False),
         Binding("m", "mkey", "Relaunch MURFI", show=True),
         Binding("p", "pkey", "Relaunch PsychoPy", show=True),
@@ -388,14 +392,22 @@ class SessionScreen(Screen[None]):
         self._notify("Nothing to interrupt")
 
     def action_bkey(self) -> None:
-        """B / ←: pure cursor move backward."""
-        self._runner.go_back()
+        """B / ↑ / ←: cursor backward, wrapping at index 0 to the last step."""
+        state = self._runner.state
+        n = len(state.steps)
+        if n == 0:
+            return
+        target = (state.cursor - 1) % n
+        self._runner.select(target)
 
     def action_nkey(self) -> None:
-        """N / →: pure cursor move forward."""
+        """N / ↓ / →: cursor forward, wrapping at the last step to index 0."""
         state = self._runner.state
-        if state.cursor < len(state.steps) - 1:
-            self._runner.select(state.cursor + 1)
+        n = len(state.steps)
+        if n == 0:
+            return
+        target = (state.cursor + 1) % n
+        self._runner.select(target)
 
     async def action_gkey(self) -> None:
         """G: prompt for step number; jump cursor. (Stub — not exercised.)"""

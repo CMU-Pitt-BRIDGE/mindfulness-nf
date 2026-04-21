@@ -17,6 +17,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Optional extras installed only on explicit opt-in.
+# Dev tooling lives under [dependency-groups] below so `uv sync` picks it
+# up by default (see [tool.uv].default-groups).
+dry-run = [
+    "nilearn>=0.10",
+]
+
+[dependency-groups]
+# PEP 735 groups — uv manages these separately from project optional-
+# dependencies. The `dev` group is listed in [tool.uv].default-groups,
+# so `uv sync` (bare) installs it automatically. `uv sync --no-default-groups`
+# skips it for production-like installs.
 dev = [
     "hypothesis>=6.0",
     "pytest>=8.0",
@@ -25,10 +37,9 @@ dev = [
     "pytest-timeout>=2.1",
     "textual-dev>=1.0",
 ]
-dry-run = [
-    "nilearn>=0.10",
-    "nibabel>=5.0",
-]
+
+[tool.uv]
+default-groups = ["dev"]
 
 [build-system]
 requires = ["hatchling"]

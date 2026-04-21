@@ -37,6 +37,7 @@ class FslStageExecutor:
         subject_dir: Path,
         pipeline: PipelineConfig,
         scanner_config: ScannerConfig,
+        dry_run: bool = False,
     ) -> None:
         if config.fsl_command is None:
             msg = f"FslStageExecutor requires StepConfig.fsl_command (step={config.name})"
@@ -45,6 +46,7 @@ class FslStageExecutor:
         self._subject_dir = subject_dir
         self._pipeline = pipeline
         self._scanner_config = scanner_config
+        self._dry_run = dry_run
         self._stopped = False
 
     # ---- public protocol -------------------------------------------------
@@ -54,6 +56,8 @@ class FslStageExecutor:
             return self._cancelled_outcome()
 
         cmd = self._config.fsl_command
+        if self._dry_run:
+            return await self._run_dry(on_progress, cmd)
         try:
             match cmd:
                 case "fslmerge":
@@ -283,6 +287,71 @@ class FslStageExecutor:
             succeeded=True,
             final_progress=self._pct(100, "selection complete"),
             artifacts={"selected_runs": run_names},
+        )
+
+    # ---- dry-run --------------------------------------------------------
+
+    async def _run_dry(
+        self, on_progress: ProgressCallback, cmd: str | None
+    ) -> StepOutcome:
+        """Simulate an FSL stage: brief progress sweep, synthesized outputs.
+
+        Creates empty-but-present placeholder files in the paths downstream
+        stages check for, so the pipeline advances without touching FSL.
+        """
+        on_progress(self._pct(20, f"dry-run: simulating {cmd}"))
+        await asyncio.sleep(0.05)
+        on_progress(self._pct(60, f"dry-run: simulating {cmd}"))
+        await asyncio.sleep(0.05)
+
+        artifacts: dict[str, Any] = {"dry_run": True}
+        mask_dir = self._subject_dir / "mask"
+        rest_dir = self._subject_dir / "rest"
+
+        match cmd:
+            case "fslmerge":
+                rest_dir.mkdir(parents=True, exist_ok=True)
+                merged = rest_dir / "sub_task-rest_run-1_bold.nii"
+                merged.touch()
+                artifacts["merged_path"] = str(merged)
+            case "melodic":
+                ica_dir = rest_dir / "rs_network.gica"
+                ica_dir.mkdir(parents=True, exist_ok=True)
+                artifacts["ica_dir"] = str(ica_dir)
+            case "extract_dmn":
+                mask_dir.mkdir(parents=True, exist_ok=True)
+                dmn = mask_dir / "dmn_rest_original.nii"
+                dmn.touch()
+                artifacts["extract_dmn_path"] = str(dmn)
+                artifacts["mask_dir"] = str(mask_dir)
+            case "extract_cen":
+                mask_dir.mkdir(parents=True, exist_ok=True)
+                cen = mask_dir / "cen_rest_original.nii"
+                cen.touch()
+                artifacts["extract_cen_path"] = str(cen)
+                artifacts["mask_dir"] = str(mask_dir)
+            case "flirt_applywarp":
+                mask_dir.mkdir(parents=True, exist_ok=True)
+                dmn_reg = mask_dir / "dmn.nii"
+                cen_reg = mask_dir / "cen.nii"
+                dmn_reg.touch()
+                cen_reg.touch()
+                artifacts["dmn_registered"] = str(dmn_reg)
+                artifacts["cen_registered"] = str(cen_reg)
+            case "qc_visualize":
+                artifacts["qc_ok"] = True
+            case "select_runs":
+                artifacts["selected_runs"] = ("run-1",)
+            case _:
+                # Unknown commands still succeed in dry-run — the operator
+                # is rehearsing; they'll notice on a real run.
+                pass
+
+        on_progress(self._pct(100, f"dry-run: {cmd} complete"))
+        return StepOutcome(
+            succeeded=True,
+            final_progress=self._pct(100, f"dry-run: {cmd} complete"),
+            artifacts=artifacts,
         )
 
     # ---- helpers ---------------------------------------------------------

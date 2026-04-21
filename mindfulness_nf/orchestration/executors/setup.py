@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from mindfulness_nf.config import PipelineConfig, ScannerConfig
-from mindfulness_nf.models import StepConfig
+from mindfulness_nf.models import CheckResult, StepConfig
 from mindfulness_nf.orchestration.executor import (
     Component,
     ProgressCallback,
@@ -15,6 +15,15 @@ from mindfulness_nf.orchestration.executor import (
     StepProgress,
 )
 from mindfulness_nf.orchestration.preflight import run_preflight
+
+# Preflight check names whose failures are ignorable in --dry-run. These are
+# all the checks that depend on a real scanner / real scanner network.
+_SCANNER_DEPENDENT_CHECK_KEYWORDS = ("scanner", "ethernet", "wi-fi", "firewall")
+
+
+def _is_scanner_dependent(check: CheckResult) -> bool:
+    lowered = check.name.lower()
+    return any(kw in lowered for kw in _SCANNER_DEPENDENT_CHECK_KEYWORDS)
 
 __all__ = ["SetupStepExecutor"]
 
@@ -32,11 +41,13 @@ class SetupStepExecutor:
         subject_dir: Path,
         pipeline: PipelineConfig,
         scanner_config: ScannerConfig,
+        dry_run: bool = False,
     ) -> None:
         self._config = config
         self._subject_dir = subject_dir
         self._pipeline = pipeline
         self._scanner_config = scanner_config
+        self._dry_run = dry_run
         self._stopped = False
 
     async def run(self, on_progress: ProgressCallback) -> StepOutcome:
@@ -44,12 +55,27 @@ class SetupStepExecutor:
             zero = StepProgress(value=0, target=1, unit="stages")
             return StepOutcome(succeeded=False, final_progress=zero, error="cancelled")
         try:
-            results = await run_preflight(
+            raw_results = await run_preflight(
                 self._scanner_config, subject_dir=self._subject_dir
             )
         except asyncio.CancelledError:
             zero = StepProgress(value=0, target=1, unit="stages")
             return StepOutcome(succeeded=False, final_progress=zero, error="cancelled")
+
+        # In dry-run, coerce failures from scanner-network-dependent checks
+        # to passed; local-machine checks (FSL, Apptainer, container, subject
+        # dir, ports) still count because dry-run needs real local tools.
+        if self._dry_run:
+            results = tuple(
+                CheckResult(
+                    name=r.name, passed=True, message="skipped (dry-run)"
+                )
+                if (not r.passed and _is_scanner_dependent(r))
+                else r
+                for r in raw_results
+            )
+        else:
+            results = raw_results
 
         total = len(results)
         all_passed = all(r.passed for r in results)

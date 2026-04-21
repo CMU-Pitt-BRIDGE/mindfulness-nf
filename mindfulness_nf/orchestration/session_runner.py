@@ -88,12 +88,14 @@ class SessionRunner:
         pipeline: PipelineConfig,
         scanner_config: ScannerConfig,
         scanner_source: ScannerSource,
+        dry_run: bool = False,
     ) -> None:
         self._state = state
         self._subject_dir = subject_dir
         self._pipeline = pipeline
         self._scanner_config = scanner_config
         self._scanner_source = scanner_source
+        self._dry_run = dry_run
 
         self._current_task: asyncio.Task[StepOutcome] | None = None
         self._current_executor: StepExecutor | None = None
@@ -115,6 +117,7 @@ class SessionRunner:
         pipeline: PipelineConfig,
         scanner_config: ScannerConfig,
         scanner_source: ScannerSource,
+        dry_run: bool = False,
     ) -> SessionRunner:
         """Resume from ``session_state.json`` if present; else build fresh.
 
@@ -151,6 +154,7 @@ class SessionRunner:
             pipeline=pipeline,
             scanner_config=scanner_config,
             scanner_source=scanner_source,
+            dry_run=dry_run,
         )
 
     # ------------------------------------------------------------------
@@ -346,6 +350,7 @@ class SessionRunner:
                     subject_dir=self._subject_dir,
                     pipeline=self._pipeline,
                     scanner_config=self._scanner_config,
+                    dry_run=self._dry_run,
                 )
             case StepKind.VSEND_SCAN:
                 return VsendStepExecutor(
@@ -377,6 +382,7 @@ class SessionRunner:
                     subject_dir=self._subject_dir,
                     pipeline=self._pipeline,
                     scanner_config=self._scanner_config,
+                    dry_run=self._dry_run,
                 )
             case _ as unreachable:
                 assert_never(unreachable)

@@ -108,7 +108,13 @@ class MindfulnessApp(App[None]):
         if scanner_source is not None:
             self.scanner_source: ScannerSource = scanner_source
         elif dry_run:
-            cache_dir = dry_run_cache_dir or _DEFAULT_DRY_RUN_CACHE
+            # dry_run_cache_dir is optional: if the default cache directory
+            # exists on disk we prefer it (matches prior recorded-session
+            # behaviour); otherwise let SimulatedScannerSource synthesize
+            # volumes under an ephemeral tmpdir.
+            cache_dir = dry_run_cache_dir
+            if cache_dir is None and _DEFAULT_DRY_RUN_CACHE.is_dir():
+                cache_dir = _DEFAULT_DRY_RUN_CACHE
             self.scanner_source = SimulatedScannerSource(cache_dir=cache_dir)
         else:
             self.scanner_source = RealScannerSource()

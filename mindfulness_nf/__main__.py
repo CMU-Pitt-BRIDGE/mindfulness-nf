@@ -32,8 +32,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--dry-run-cache",
         dest="dry_run_cache",
-        default="murfi/dry_run_cache",
-        help="Override dry-run cache directory (default: murfi/dry_run_cache)",
+        default=None,
+        help=(
+            "Optional path to a pre-populated dry-run cache. "
+            "If omitted, synthetic volumes are fabricated on demand."
+        ),
     )
     # Back-compat: legacy --test flag used to gate the deleted TestScreen.
     parser.add_argument(
@@ -47,17 +50,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
-    cache = Path(args.dry_run_cache)
-    if args.dry_run:
-        if not cache.is_dir() or not any(cache.iterdir()):
-            print(
-                "error: --dry-run requires "
-                f"{cache}/ to be populated.\n"
-                "Run scripts/populate_dry_run_cache.py <source_session_dir> "
-                "first.",
-                file=sys.stderr,
-            )
-            return 1
+    # --dry-run no longer requires a pre-populated cache: when --dry-run-cache
+    # is omitted, SimulatedScannerSource fabricates volumes on demand under a
+    # tmpdir. Operators who *do* have a recorded cache can still point at it.
+    cache = Path(args.dry_run_cache) if args.dry_run_cache else None
 
     # Default subject override for dry-run so operators don't have to type
     # a sub-ID every rehearsal.

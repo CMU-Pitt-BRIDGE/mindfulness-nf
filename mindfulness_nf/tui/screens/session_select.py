@@ -124,5 +124,6 @@ class SessionSelectScreen(Screen[str]):
             pipeline=app.pipeline_config,
             scanner_config=app.scanner_config,
             scanner_source=app.scanner_source,
+            dry_run=getattr(app, "dry_run", False),
         )
         app.push_screen(SessionScreen(runner))

@@ -14,10 +14,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Protocol
 
 from mindfulness_nf.models import StepConfig
+from mindfulness_nf.orchestration.synthetic_volumes import (
+    generate_synthetic_dicom_series,
+    generate_synthetic_nifti_series,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +114,14 @@ class SimulatedScannerSource:
     raising — dry-run rehearsals are expected to run on configured hosts.
     """
 
-    def __init__(self, cache_dir: Path, tr_seconds: float = 1.2) -> None:
+    def __init__(
+        self, cache_dir: Path | None = None, tr_seconds: float = 1.2
+    ) -> None:
+        if cache_dir is None:
+            # Ephemeral scratch dir; lives for the life of this source so
+            # synthetic volumes persist across consecutive steps (letting us
+            # generate once per rehearsal rather than once per step).
+            cache_dir = Path(tempfile.mkdtemp(prefix="murfi_dryrun_"))
         self.cache_dir = cache_dir
         self.tr_seconds = tr_seconds
         self._procs: list[asyncio.subprocess.Process] = []
@@ -129,8 +141,19 @@ class SimulatedScannerSource:
         nifti_dir = self.cache_dir / "nifti"
         volumes = sorted(nifti_dir.glob("*.nii*")) if nifti_dir.is_dir() else []
         if not volumes:
-            logger.warning("No cached NIfTI volumes under %s; nothing to push", nifti_dir)
-            return
+            # Fallback: no pre-recorded cache — fabricate just enough volumes
+            # for this step. Keeps the cached-session rehearsal path intact
+            # while making --dry-run work out of the box.
+            logger.info(
+                "SimulatedScannerSource: no cached NIfTI under %s; "
+                "synthesizing %d volume(s) for step %s",
+                nifti_dir,
+                step.progress_target,
+                step.name,
+            )
+            volumes = generate_synthetic_nifti_series(
+                nifti_dir, count=step.progress_target, tr=self.tr_seconds
+            )
 
         # vSend typically takes a config (xml_path) and a list of volumes; exact
         # flags are site-specific and wrapped here defensively. The pacing
@@ -158,8 +181,16 @@ class SimulatedScannerSource:
         dicom_dir = self.cache_dir / "dicom"
         dicoms = sorted(dicom_dir.glob("*.dcm")) if dicom_dir.is_dir() else []
         if not dicoms:
-            logger.warning("No cached DICOMs under %s; nothing to push", dicom_dir)
-            return
+            logger.info(
+                "SimulatedScannerSource: no cached DICOMs under %s; "
+                "synthesizing %d file(s) for step %s",
+                dicom_dir,
+                step.progress_target,
+                step.name,
+            )
+            dicoms = generate_synthetic_dicom_series(
+                dicom_dir, count=step.progress_target
+            )
 
         cmd = [
             binary,

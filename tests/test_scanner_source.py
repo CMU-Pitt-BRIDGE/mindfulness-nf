@@ -169,6 +169,79 @@ class TestSimulatedScannerSourceVsend:
         create.assert_not_called()
 
 
+class TestSimulatedScannerSourceSynthesis:
+    """Empty cache triggers synthetic volume generation; populated cache is preserved."""
+
+    @pytest.mark.asyncio
+    async def test_auto_synthesizes_when_cache_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "mindfulness_nf.orchestration.scanner_source.shutil.which",
+            lambda _name: "/usr/local/bin/vSend",
+        )
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.wait = AsyncMock(return_value=0)
+        proc.terminate = MagicMock()
+        create = AsyncMock(return_value=proc)
+        monkeypatch.setattr(
+            "mindfulness_nf.orchestration.scanner_source.asyncio.create_subprocess_exec",
+            create,
+        )
+
+        source = SimulatedScannerSource(cache_dir=tmp_path)
+        # _step() above sets progress_target=2 so we expect 2 synthesized files.
+        await source.push_vsend(tmp_path / "x.xml", tmp_path, _step())
+
+        nifti_dir = tmp_path / "nifti"
+        generated = sorted(nifti_dir.glob("*.nii*"))
+        assert len(generated) == 2
+        # The generated files made it into the vSend command.
+        called_args = create.await_args.args
+        for g in generated:
+            assert str(g) in called_args
+
+    @pytest.mark.asyncio
+    async def test_preserves_existing_cache(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Pre-populate cache with a single pretend-real volume.
+        nifti_dir = tmp_path / "nifti"
+        nifti_dir.mkdir()
+        existing = nifti_dir / "prerecorded_0001.nii.gz"
+        existing.write_bytes(b"REAL_DATA_MARKER")
+
+        monkeypatch.setattr(
+            "mindfulness_nf.orchestration.scanner_source.shutil.which",
+            lambda _name: "/usr/local/bin/vSend",
+        )
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.wait = AsyncMock(return_value=0)
+        proc.terminate = MagicMock()
+        create = AsyncMock(return_value=proc)
+        monkeypatch.setattr(
+            "mindfulness_nf.orchestration.scanner_source.asyncio.create_subprocess_exec",
+            create,
+        )
+
+        source = SimulatedScannerSource(cache_dir=tmp_path)
+        await source.push_vsend(tmp_path / "x.xml", tmp_path, _step())
+
+        # Existing file is still there, unchanged.
+        assert existing.read_bytes() == b"REAL_DATA_MARKER"
+        # No synthetic file was generated.
+        contents = sorted(p.name for p in nifti_dir.iterdir())
+        assert contents == ["prerecorded_0001.nii.gz"]
+
+    def test_defaults_to_tmpdir_when_no_cache_dir(self) -> None:
+        source = SimulatedScannerSource()
+        assert source.cache_dir.is_dir()
+        # Name reflects our prefix for discoverability.
+        assert "murfi_dryrun_" in source.cache_dir.name
+
+
 class TestSimulatedScannerSourceCancel:
     """cancel() terminates every tracked subprocess and reaps it."""
 

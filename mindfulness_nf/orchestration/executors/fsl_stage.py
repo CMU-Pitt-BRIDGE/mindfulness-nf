@@ -11,6 +11,7 @@ returning a cancellation outcome at the next boundary.
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,21 @@ from mindfulness_nf.orchestration.executor import (
 )
 
 __all__ = ["FslStageExecutor"]
+
+logger = logging.getLogger(__name__)
+
+# Real-BOLD dry-run cache populated by scripts/fetch_dry_run_bold.py.
+# When present, dry-run FSL stages run the real FSL subprocess against
+# this data instead of producing empty placeholder files.
+_BOLD_CACHE_DIR = Path("murfi/dry_run_cache_bold")
+
+
+def _bold_cache_has_data() -> bool:
+    """Return True if the real-BOLD dry-run cache contains NIfTI volumes."""
+    nifti_dir = _BOLD_CACHE_DIR / "nifti"
+    if not nifti_dir.is_dir():
+        return False
+    return any(nifti_dir.glob("*.nii*"))
 
 
 class FslStageExecutor:
@@ -57,7 +73,22 @@ class FslStageExecutor:
 
         cmd = self._config.fsl_command
         if self._dry_run:
-            return await self._run_dry(on_progress, cmd)
+            # If the real-BOLD dry-run cache is populated, escalate to running
+            # the actual FSL subprocess against that data — otherwise fall
+            # back to placeholder-file stubs.
+            if _bold_cache_has_data():
+                logger.info(
+                    "FslStageExecutor: dry-run with real-BOLD cache present; "
+                    "running real FSL for %s",
+                    cmd,
+                )
+            else:
+                logger.info(
+                    "FslStageExecutor: dry-run without real-BOLD cache; "
+                    "stubbing %s",
+                    cmd,
+                )
+                return await self._run_dry(on_progress, cmd)
         try:
             match cmd:
                 case "fslmerge":

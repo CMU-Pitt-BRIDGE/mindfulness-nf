@@ -8,6 +8,18 @@ Subject ID convention for rehearsals: `sub-rehearse-YYYYMMDD` (e.g., `sub-rehear
 
 ---
 
+## 0. One-time setup: real BOLD for Process-session rehearsal (optional)
+
+Without a real-BOLD cache, dry-run falls back to random-noise volumes and the Process session stubs FSL MELODIC with placeholder files. To rehearse the Process session end-to-end with real FSL running on real public data:
+
+- [ ] Install the `dry-run` extra: `uv sync --extra dry-run`
+- [ ] Fetch once (~100 MB, cached by nilearn): `uv run python scripts/fetch_dry_run_bold.py`
+- [ ] Verify: `ls murfi/dry_run_cache_bold/nifti/` lists per-volume NIfTIs
+
+When this cache is populated, `SimulatedScannerSource` prefers it over synthetic volumes and `FslStageExecutor(dry_run=True)` runs the real FSL subprocess instead of stubbing. The cache is gitignored; a single fetch covers every subsequent rehearsal.
+
+---
+
 ## 1. Preflight tests
 
 - [ ] Run `bash scripts/preflight_test.sh`

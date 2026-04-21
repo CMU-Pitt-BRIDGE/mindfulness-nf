@@ -1,6 +1,7 @@
 """Main Textual App class for the mindfulness neurofeedback pipeline.
 
-Imperative shell: imports models from core and widgets from tui/widgets/.
+Imperative shell: selects the scanner source (real vs simulated), wires
+orchestration config to the screens, and owns the screen stack lifecycle.
 """
 
 from __future__ import annotations
@@ -14,6 +15,12 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Label
 
 from mindfulness_nf.config import PipelineConfig, ScannerConfig
+from mindfulness_nf.orchestration.scanner_source import (
+    RealScannerSource,
+    ScannerSource,
+    SimulatedScannerSource,
+)
+from mindfulness_nf.tui.screens.session_select import SessionSelectScreen
 from mindfulness_nf.tui.screens.subject_entry import SubjectEntryScreen
 
 
@@ -60,6 +67,10 @@ class QuitConfirmScreen(ModalScreen[bool]):
 
 
 _CSS_PATH = Path(__file__).resolve().parent / "styles" / "app.tcss"
+_DEFAULT_SUBJECTS_DIR = Path(__file__).resolve().parents[2] / "murfi" / "subjects"
+_DEFAULT_DRY_RUN_CACHE = (
+    Path(__file__).resolve().parents[2] / "murfi" / "dry_run_cache"
+)
 
 
 class MindfulnessApp(App[None]):
@@ -75,27 +86,49 @@ class MindfulnessApp(App[None]):
         self,
         *,
         test_mode: bool = False,
+        dry_run: bool = False,
+        subject_override: str | None = None,
         scanner_config: ScannerConfig | None = None,
         pipeline_config: PipelineConfig | None = None,
         subjects_dir: Path | None = None,
         template_dir: Path | None = None,
+        dry_run_cache_dir: Path | None = None,
+        scanner_source: ScannerSource | None = None,
     ) -> None:
         super().__init__()
         self.test_mode = test_mode
+        self.dry_run = dry_run
+        self.subject_override = subject_override
         self.scanner_config = scanner_config or ScannerConfig()
         self.pipeline_config = pipeline_config or PipelineConfig()
-        self.subjects_dir = subjects_dir or (
-            Path(__file__).resolve().parents[2] / "murfi" / "subjects"
-        )
-        self.template_dir = template_dir or (
-            Path(__file__).resolve().parents[2] / "murfi" / "subjects" / "template"
-        )
-        self.subject_id: str = ""
+        self.subjects_dir = subjects_dir or _DEFAULT_SUBJECTS_DIR
+        self.template_dir = template_dir or (self.subjects_dir / "template")
+
+        # Pick scanner source based on dry_run (caller may override directly).
+        if scanner_source is not None:
+            self.scanner_source: ScannerSource = scanner_source
+        elif dry_run:
+            cache_dir = dry_run_cache_dir or _DEFAULT_DRY_RUN_CACHE
+            self.scanner_source = SimulatedScannerSource(cache_dir=cache_dir)
+        else:
+            self.scanner_source = RealScannerSource()
+
+        # If the caller pre-selected a subject, seed subject_id; otherwise
+        # the SubjectEntryScreen will populate it.
+        self.subject_id: str = subject_override or ""
         self.session_type: str = ""
 
     def on_mount(self) -> None:
-        """Push the initial screen on mount."""
-        self.push_screen(SubjectEntryScreen())
+        """Push the initial screen on mount.
+
+        If ``subject_override`` was provided (e.g. ``--subject`` or
+        ``--dry-run``), skip :class:`SubjectEntryScreen` and go straight to
+        :class:`SessionSelectScreen`.
+        """
+        if self.subject_override:
+            self.push_screen(SessionSelectScreen())
+        else:
+            self.push_screen(SubjectEntryScreen())
 
     def action_request_quit(self) -> None:
         """Quit with confirmation dialog."""

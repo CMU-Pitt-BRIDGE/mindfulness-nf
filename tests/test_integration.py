@@ -1,140 +1,90 @@
-"""End-to-end integration smoke tests.
+"""End-to-end integration smoke test for the new SessionRunner-based flow.
 
-Launches MindfulnessApp with Textual's run_test() pilot,
-walks through subject entry -> session select -> localizer,
-and verifies screen transitions and quit confirmation.
+Covers the operator path:
+
+    SubjectEntryScreen -> SessionSelectScreen -> SessionScreen
+
+The old per-session screens (``LocalizerScreen``/``NeurofeedbackScreen``/
+``TestScreen``) were removed by todo-25 and replaced by the unified
+:class:`SessionScreen`, which is what these tests now exercise.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
 
 import pytest
 from textual.widgets import Input
 
-from mindfulness_nf.models import CheckResult
+from mindfulness_nf.orchestration.scanner_source import NoOpScannerSource
 from mindfulness_nf.tui.app import MindfulnessApp
+from mindfulness_nf.tui.screens.session import SessionScreen
 from mindfulness_nf.tui.screens.session_select import SessionSelectScreen
-from mindfulness_nf.tui.screens.subject_entry import SubjectEntryScreen
-from mindfulness_nf.tui.screens.test import TestScreen
 
 
-def _all_pass_preflight() -> list[CheckResult]:
-    return [
-        CheckResult(name=f"Check {i}", passed=True, message="OK")
-        for i in range(13)
-    ]
-
-
-@pytest.mark.asyncio
-async def test_full_localizer_flow(tmp_path: Path) -> None:
-    """Smoke test: subject entry -> session select -> localizer screen."""
-    subjects_dir = tmp_path / "subjects"
-    subjects_dir.mkdir()
-    template_dir = tmp_path / "template"
-    template_dir.mkdir()
-    (template_dir / "xml" / "xml_vsend").mkdir(parents=True)
-
-    app = MindfulnessApp(
-        test_mode=True,
-        subjects_dir=subjects_dir,
-        template_dir=template_dir,
-    )
-
-    mock_preflight = AsyncMock(return_value=_all_pass_preflight())
-
-    with patch(
-        "mindfulness_nf.orchestration.preflight.run_preflight",
-        mock_preflight,
-    ):
-        async with app.run_test() as pilot:
-            # Step 1: SubjectEntryScreen should be active
-            await pilot.pause()
-            assert isinstance(app.screen, SubjectEntryScreen)
-
-            # Type a subject ID into the input
-            input_widget = app.screen.query_one("#subject-input", Input)
-            input_widget.value = "sub-int01"
-            await pilot.pause()
-
-            # Press Enter to submit
-            await pilot.press("enter")
-            await pilot.pause()
-
-            # Step 2: Should have transitioned to SessionSelectScreen
-            assert isinstance(app.screen, SessionSelectScreen)
-            assert app.subject_id == "sub-int01"
-
-            # Subject directory should have been created
-            assert (subjects_dir / "sub-int01").is_dir()
-
-            # Press "1" for localizer
-            await pilot.press("1")
-            await pilot.pause()
-
-            # Step 3: In test_mode, all sessions route to TestScreen
-            assert isinstance(app.screen, TestScreen)
-            assert app.session_type == "localizer"
+def _prime_template(tmp_path: Path) -> Path:
+    """Create a minimal ``template/xml/xml_vsend/`` tree under ``tmp_path``."""
+    template = tmp_path / "template"
+    (template / "xml" / "xml_vsend").mkdir(parents=True, exist_ok=True)
+    return template
 
 
 @pytest.mark.asyncio
-async def test_quit_confirmation(tmp_path: Path) -> None:
-    """Smoke test: Escape opens quit dialog, cancel dismisses it."""
-    subjects_dir = tmp_path / "subjects"
-    subjects_dir.mkdir()
-    template_dir = tmp_path / "template"
-    template_dir.mkdir()
+async def test_app_starts_with_subject_override_directly_to_session_select(
+    tmp_path: Path,
+) -> None:
+    """With ``subject_override`` set, SubjectEntry is skipped.
+
+    First screen should be :class:`SessionSelectScreen`.
+    """
+    _prime_template(tmp_path)
 
     app = MindfulnessApp(
-        test_mode=True,
-        subjects_dir=subjects_dir,
-        template_dir=template_dir,
+        dry_run=False,
+        subject_override="sub-001",
+        subjects_dir=tmp_path,
+        scanner_source=NoOpScannerSource(),
     )
 
     async with app.run_test() as pilot:
         await pilot.pause()
-        assert isinstance(app.screen, SubjectEntryScreen)
-
-        # Press Escape to trigger quit confirmation
-        # (SubjectEntryScreen binds escape -> app.request_quit)
-        await pilot.press("escape")
-        await pilot.pause()
-
-        # QuitConfirmScreen should be on the stack
-        from mindfulness_nf.tui.app import QuitConfirmScreen
-
-        assert isinstance(app.screen, QuitConfirmScreen)
-
-        # Click Cancel to dismiss
-        await pilot.click("#quit-no")
-        await pilot.pause()
-
-        # Should be back on SubjectEntryScreen
-        assert isinstance(app.screen, SubjectEntryScreen)
+        assert isinstance(app.screen, SessionSelectScreen)
+        assert app.subject_id == "sub-001"
 
 
 @pytest.mark.asyncio
-async def test_quit_confirm_exits(tmp_path: Path) -> None:
-    """Smoke test: Escape then Quit button exits the app."""
-    subjects_dir = tmp_path / "subjects"
-    subjects_dir.mkdir()
-    template_dir = tmp_path / "template"
-    template_dir.mkdir()
+async def test_full_app_flow_subject_to_session_screen(tmp_path: Path) -> None:
+    """Enter subject, press ``1`` for Localizer; SessionScreen should load.
+
+    Uses :class:`NoOpScannerSource` so no real binaries are invoked.
+    """
+    _prime_template(tmp_path)
 
     app = MindfulnessApp(
-        test_mode=True,
-        subjects_dir=subjects_dir,
-        template_dir=template_dir,
+        dry_run=False,
+        subjects_dir=tmp_path,
+        scanner_source=NoOpScannerSource(),
     )
 
     async with app.run_test() as pilot:
         await pilot.pause()
 
-        # Press Escape to trigger quit confirmation
-        await pilot.press("escape")
+        # Type subject ID and submit.
+        input_widget = app.screen.query_one(Input)
+        input_widget.focus()
+        await pilot.pause()
+        await pilot.press(*list("sub-001"))
+        await pilot.press("enter")
         await pilot.pause()
 
-        # Click Quit to confirm exit
-        await pilot.click("#quit-yes")
+        # SessionSelectScreen should now be active.
+        assert isinstance(app.screen, SessionSelectScreen)
+        assert app.subject_id == "sub-001"
+
+        # Press "1" to pick Localizer.
+        await pilot.press("1")
         await pilot.pause()
+
+        # SessionScreen should now be on top; session_type seeded to loc3.
+        assert isinstance(app.screen, SessionScreen)
+        assert app.session_type == "loc3"

@@ -241,6 +241,56 @@ class TestSimulatedScannerSourceSynthesis:
         # Name reflects our prefix for discoverability.
         assert "murfi_dryrun_" in source.cache_dir.name
 
+    @pytest.mark.asyncio
+    async def test_simulated_scanner_source_prefers_bold_cache_over_synthesis(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Empty explicit cache + populated BOLD cache -> use BOLD cache.
+
+        BOLD cache must take priority over synthesis (tier 2 > tier 3).
+        """
+        # Build the real-BOLD cache location inside tmp_path and monkeypatch
+        # the class attribute to point at it.
+        bold_cache = tmp_path / "dry_run_cache_bold"
+        bold_nifti_dir = bold_cache / "nifti"
+        bold_nifti_dir.mkdir(parents=True)
+        bold_vol = bold_nifti_dir / "vol_0001.nii"
+        bold_vol.write_bytes(b"REAL_BOLD_DATA")
+
+        monkeypatch.setattr(SimulatedScannerSource, "BOLD_CACHE_DIR", bold_cache)
+
+        # The explicit cache_dir is intentionally empty -> fallback kicks in.
+        explicit_cache = tmp_path / "explicit"
+        explicit_cache.mkdir()
+
+        monkeypatch.setattr(
+            "mindfulness_nf.orchestration.scanner_source.shutil.which",
+            lambda _name: "/usr/local/bin/vSend",
+        )
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.wait = AsyncMock(return_value=0)
+        proc.terminate = MagicMock()
+        create = AsyncMock(return_value=proc)
+        monkeypatch.setattr(
+            "mindfulness_nf.orchestration.scanner_source.asyncio.create_subprocess_exec",
+            create,
+        )
+
+        source = SimulatedScannerSource(cache_dir=explicit_cache)
+        await source.push_vsend(tmp_path / "x.xml", tmp_path, _step())
+
+        # The BOLD volume is in the vSend command.
+        called_args = create.await_args.args
+        assert str(bold_vol) in called_args
+
+        # No synthetic volume was written to the explicit cache's nifti dir.
+        explicit_nifti = explicit_cache / "nifti"
+        assert not explicit_nifti.exists() or not any(explicit_nifti.iterdir())
+
+        # BOLD file is intact.
+        assert bold_vol.read_bytes() == b"REAL_BOLD_DATA"
+
 
 class TestSimulatedScannerSourceCancel:
     """cancel() terminates every tracked subprocess and reaps it."""

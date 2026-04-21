@@ -25,6 +25,10 @@ dev = [
     "pytest-timeout>=2.1",
     "textual-dev>=1.0",
 ]
+dry-run = [
+    "nilearn>=0.10",
+    "nibabel>=5.0",
+]
 
 [build-system]
 requires = ["hatchling"]

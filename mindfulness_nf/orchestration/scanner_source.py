@@ -112,7 +112,19 @@ class SimulatedScannerSource:
     Discovers binaries via `shutil.which`. In CI / minimal environments the
     binaries may be absent; push methods log a warning and return rather than
     raising — dry-run rehearsals are expected to run on configured hosts.
+
+    Cache lookup precedence (for push_vsend):
+        1. Explicit ``cache_dir`` (constructor arg / tmpdir) if it contains
+           NIfTIs — highest priority, lets tests and ad-hoc rehearsals pin a
+           specific dataset.
+        2. ``BOLD_CACHE_DIR`` (``murfi/dry_run_cache_bold/``) if populated —
+           the real-BOLD cache produced by ``scripts/fetch_dry_run_bold.py``.
+           Enables FSL ICA to run on real public data during rehearsal.
+        3. Synthesize random-noise volumes — last resort; enables MURFI/
+           PsychoPy rehearsal out of the box but not meaningful FSL ICA.
     """
+
+    BOLD_CACHE_DIR: Path = Path("murfi/dry_run_cache_bold")
 
     def __init__(
         self, cache_dir: Path | None = None, tr_seconds: float = 1.2
@@ -138,22 +150,44 @@ class SimulatedScannerSource:
             logger.warning("vSend binary not on PATH; SimulatedScannerSource.push_vsend is a no-op")
             return
 
+        # 3-tier cache lookup: explicit > bold (real public BOLD) > synthetic.
         nifti_dir = self.cache_dir / "nifti"
         volumes = sorted(nifti_dir.glob("*.nii*")) if nifti_dir.is_dir() else []
-        if not volumes:
-            # Fallback: no pre-recorded cache — fabricate just enough volumes
-            # for this step. Keeps the cached-session rehearsal path intact
-            # while making --dry-run work out of the box.
+        if volumes:
             logger.info(
-                "SimulatedScannerSource: no cached NIfTI under %s; "
-                "synthesizing %d volume(s) for step %s",
+                "SimulatedScannerSource: using explicit cache %s (%d volumes)",
                 nifti_dir,
-                step.progress_target,
-                step.name,
+                len(volumes),
             )
-            volumes = generate_synthetic_nifti_series(
-                nifti_dir, count=step.progress_target, tr=self.tr_seconds
+        else:
+            bold_nifti_dir = self.BOLD_CACHE_DIR / "nifti"
+            bold_volumes = (
+                sorted(bold_nifti_dir.glob("*.nii*"))
+                if bold_nifti_dir.is_dir()
+                else []
             )
+            if bold_volumes:
+                logger.info(
+                    "SimulatedScannerSource: using real-BOLD cache %s (%d volumes)",
+                    bold_nifti_dir,
+                    len(bold_volumes),
+                )
+                volumes = bold_volumes
+            else:
+                # Fallback: no pre-recorded cache — fabricate just enough
+                # volumes for this step. Keeps the cached-session rehearsal
+                # path intact while making --dry-run work out of the box.
+                logger.info(
+                    "SimulatedScannerSource: no cached NIfTI (checked %s, %s); "
+                    "synthesizing %d volume(s) for step %s",
+                    nifti_dir,
+                    bold_nifti_dir,
+                    step.progress_target,
+                    step.name,
+                )
+                volumes = generate_synthetic_nifti_series(
+                    nifti_dir, count=step.progress_target, tr=self.tr_seconds
+                )
 
         # vSend typically takes a config (xml_path) and a list of volumes; exact
         # flags are site-specific and wrapped here defensively. The pacing

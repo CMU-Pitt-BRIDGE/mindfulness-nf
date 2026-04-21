@@ -21,3 +21,7 @@ murfi/logs/*.log
 
 # Dry-run cache (populated from real session data)
 murfi/dry_run_cache/
+
+# Real-BOLD dry-run cache (downloaded from public datasets via
+# scripts/fetch_dry_run_bold.py — enables meaningful FSL rehearsal)
+murfi/dry_run_cache_bold/

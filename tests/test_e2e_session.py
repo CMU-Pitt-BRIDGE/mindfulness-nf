@@ -1266,6 +1266,80 @@ class TestNavigation:
 
     @_needs_screen
     @pytest.mark.asyncio
+    async def test_n_wraps_from_last_step_to_first(
+        self,
+        tmp_path: Path,
+        fresh_state: Any,
+        pipeline_config_test: Any,
+        scanner_config_test: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Pressing N on the final step wraps cursor to index 0."""
+        runner = _make_runner(
+            tmp_path, fresh_state, pipeline_config_test, scanner_config_test
+        )
+        last_idx = len(runner.state.steps) - 1
+        runner.select(last_idx)
+
+        app = _SessionScreenApp(runner)
+        async with app.run_test() as pilot:
+            await pilot.press("n")
+            await pilot.pause()
+            assert runner.state.cursor == 0
+
+    @_needs_screen
+    @pytest.mark.asyncio
+    async def test_b_wraps_from_first_step_to_last(
+        self,
+        tmp_path: Path,
+        fresh_state: Any,
+        pipeline_config_test: Any,
+        scanner_config_test: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Pressing B on cursor==0 wraps to the final step."""
+        runner = _make_runner(
+            tmp_path, fresh_state, pipeline_config_test, scanner_config_test
+        )
+        assert runner.state.cursor == 0
+
+        app = _SessionScreenApp(runner)
+        async with app.run_test() as pilot:
+            await pilot.press("b")
+            await pilot.pause()
+            assert runner.state.cursor == len(runner.state.steps) - 1
+
+    @_needs_screen
+    @pytest.mark.asyncio
+    async def test_up_and_down_arrows_navigate(
+        self,
+        tmp_path: Path,
+        fresh_state: Any,
+        pipeline_config_test: Any,
+        scanner_config_test: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Up/Down arrows navigate like B/N (natural for a vertical step list)."""
+        runner = _make_runner(
+            tmp_path, fresh_state, pipeline_config_test, scanner_config_test
+        )
+        app = _SessionScreenApp(runner)
+        async with app.run_test() as pilot:
+            # Starting at cursor=0, Down goes forward
+            await pilot.press("down")
+            await pilot.pause()
+            assert runner.state.cursor == 1
+            # Up goes backward
+            await pilot.press("up")
+            await pilot.pause()
+            assert runner.state.cursor == 0
+            # Up at index 0 wraps to last
+            await pilot.press("up")
+            await pilot.pause()
+            assert runner.state.cursor == len(runner.state.steps) - 1
+
+    @_needs_screen
+    @pytest.mark.asyncio
     async def test_advance_phase_triggers_psychopy_launch_in_nf_run(
         self,
         tmp_path: Path,

@@ -190,6 +190,13 @@ class TestSimulatedScannerSourceSynthesis:
             create,
         )
 
+        # Isolate from any populated real-BOLD cache on the developer's machine
+        # (murfi/dry_run_cache_bold/). Point it at a non-existent dir so the
+        # 3-tier lookup skips it and falls through to synthesis.
+        monkeypatch.setattr(
+            SimulatedScannerSource, "BOLD_CACHE_DIR", tmp_path / "no-bold-cache",
+        )
+
         source = SimulatedScannerSource(cache_dir=tmp_path)
         # _step() above sets progress_target=2 so we expect 2 synthesized files.
         await source.push_vsend(tmp_path / "x.xml", tmp_path, _step())

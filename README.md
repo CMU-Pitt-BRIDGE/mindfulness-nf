@@ -6,9 +6,11 @@ Real-time fMRI neurofeedback targeting the Default Mode Network (DMN) and Centra
 **PI:** Dr. Kymberly Young (Pitt Psychiatry)
 **Collaborators:** Dr. Danella Hafeman (Pitt), Dr. Sue Whitfield-Gabrieli and Clemens Bauer (Northeastern)
 
-## Quick Start
+## Why the operator interface exists
 
-### Install
+A scanner session costs the participant an hour and the lab a slot. Mid-session failures that forced the operator to quit and restart were professionally unacceptable. The current TUI drives sessions through a resilient `SessionRunner`: every transition persists to disk, any step can be redone, MURFI or PsychoPy can be relaunched without discarding collected volumes, and the whole session can be rehearsed with a simulated scanner.
+
+## Install
 
 Requires Python 3.13+, [uv](https://docs.astral.sh/uv/), FSL 6+, and Apptainer.
 
@@ -19,37 +21,91 @@ uv venv --python 3.13
 uv sync --extra dev
 ```
 
-### Launch the TUI
+## Run a session
+
+Launch the TUI. It prompts for a subject ID, then for a session type.
 
 ```bash
 uv run mindfulness-nf
 ```
 
-Or double-click the desktop icon (installed at `~/Desktop/mindfulness-nf.desktop`).
-
-### Test without a scanner
+Pass `--subject` to skip the subject prompt.
 
 ```bash
-# Level 0: PsychoPy ball task with fake data (no MURFI)
-bash murfi/scripts/test_pipeline.sh 0
-
-# Level 1: MURFI receives 2 simulated volumes (needs 2nd terminal for: test_pipeline.sh serve 2)
-bash murfi/scripts/test_pipeline.sh 1
-
-# Level 3: Full loop, one terminal (MURFI + simulated volumes + PsychoPy)
-bash murfi/scripts/test_pipeline.sh 3
-
-# TUI dry-run mode (simulated volumes, no scanner or MURFI)
-uv run mindfulness-nf --test
+uv run mindfulness-nf --subject sub-001
 ```
 
-### Run the test suite
+### Session types
+
+| Key | Type | Purpose |
+|-----|------|---------|
+| 1 | Localizer (loc3) | Preflight, 2-volume reference, 2 resting-state runs |
+| 2 | RT15 | 9 steps: Setup, 2vol, Transfer Pre, Feedback 1-5, Transfer Post |
+| 3 | RT30 | 15 steps: RT15 plus Transfer Post 1, Feedback 6-10, Transfer Post 2 |
+| 4 | Process | FSL pipeline: merge, MELODIC, DMN/CEN extraction, registration, QC |
+
+### Dry-run rehearsal
+
+Rehearse any session type end-to-end against a simulated scanner. MURFI and PsychoPy launch for real; only the scanner is simulated.
 
 ```bash
-uv run pytest tests/ -x -q
+uv run mindfulness-nf --dry-run --subject sub-rehearse
 ```
 
-349 tests. No scanner, MURFI, or display required.
+Populate the dry-run cache once from a real session's raw volumes.
+
+```bash
+uv run python scripts/populate_dry_run_cache.py <real_session_path>
+```
+
+The cache lives at `murfi/dry_run_cache/` (gitignored). If the cache is missing, `--dry-run` refuses to start and prints the populate command.
+
+## Keybindings
+
+The help bar shows only keys valid for the current step status. Cursor navigation never interrupts a running step.
+
+| Key | When valid | Action |
+|-----|------------|--------|
+| `d` | status=pending | Start the step |
+| `d` | status=running, `awaiting_advance=True` | Advance phase (MURFI to PsychoPy) |
+| `d` | status=completed | Move cursor forward; auto-start next pending step |
+| `d` | status=failed | No-op; press `r` or `i` |
+| `r` | cursor step not running, no other step running | Clear files and restart step (confirms on completed) |
+| `r` | cursor step running | Stop, clear, restart |
+| `i` | any step running | Interrupt running step; clear its partial data; mark pending |
+| `i` | cursor step failed, nothing running | Clear cursor step's partial data; mark pending |
+| `b` / `left` | any | Move cursor backward |
+| `n` / `right` | any | Move cursor forward |
+| `g` | any | Prompt for step number; jump cursor |
+| `m` | status=running, `murfi` in components | Relaunch MURFI; keep data and progress |
+| `p` | status=running, `psychopy` in components | Relaunch PsychoPy; keep data and progress |
+| `esc` | any | Quit; prompts before stopping a running step |
+
+`r` destroys on-disk data for the step. `m` and `p` keep data; they restart one subprocess.
+
+## Resume
+
+Force-quitting a session leaves `session_state.json` on disk. Relaunch with the same `--subject` and the same session type; the cursor lands where it was. Any step marked `running` at the time of the crash is coerced to `failed` on load. Partial `.nii` files stay on disk; press `r` on the failed step to clear them.
+
+## Before a scanner session
+
+Run the preflight test suite. It must print the green banner before you touch the scanner.
+
+```bash
+bash scripts/preflight_test.sh
+```
+
+Then walk through the dry-run checklist.
+
+See `docs/operator/rehearsal.md`.
+
+## Running tests
+
+```bash
+uv run pytest tests/
+```
+
+Three layers: pure state machine (milliseconds), runner with mocked processes (seconds), end-to-end with the Textual harness and fake MURFI/PsychoPy subprocesses (~2 minutes total). No scanner, MURFI container, or display required.
 
 ## Architecture
 
@@ -67,130 +123,33 @@ Scanner (VE11C, 192.168.2.1)
     |       |
     |   Participant display
     |
-    +-- DICOM export (TCP 4006)        Resting state runs (MoCo OFF)
+    +-- DICOM export (TCP 4006)        Resting-state runs (MoCo OFF)
             |
         dicom_receiver.py (pynetdicom, AE title: MURFI)
 ```
 
-### Data transfer modes
+Ports 50000 and 4006 must be open for the scanner subnet (192.168.2.0/24). Wi-Fi must be off during sessions.
 
-| Scan Type | Transfer | Port | Scanner MoCo |
-|-----------|----------|------|-------------|
-| 2-volume reference | Vsend | 50000 | ON |
-| Resting state | DICOM export | 4006 | OFF |
-| Feedback/Transfer | Vsend | 50000 | ON |
+## BIDS layout
 
-Vsend delivers motion-corrected volumes in real time (requires C2P agreement). DICOM export uses standard C-STORE; the Python receiver listens on port 4006. After a resting state scan, send from the Patient Browser to the `MURFI_DICOM` node.
-
-Ports 50000 and 4006 must be open for the scanner subnet (192.168.2.0/24).
-
-## Operator Interface (Textual TUI)
-
-The TUI replaces the previous zenity/bash interface. Research assistants operate the system through single-keypress interactions.
-
-**Screen flow:**
-```
-Subject Entry --> Session Select --> Localizer | Process | Neurofeedback | Test
-```
-
-**Traffic light model:**
-
-| Color | Meaning | Action |
-|-------|---------|--------|
-| Green | All checks pass | Press D to advance |
-| Yellow | Warning, can continue | Press D twice to confirm |
-| Red | Critical failure | Cannot advance; quit and report |
-
-**Sessions:**
-
-- **Localizer** (Session 1): Preflight checks, 2-volume reference scan, 2 resting state runs.
-- **Process** (between sessions): ICA run selection with quality table, FEAT/MELODIC (~25 min), DMN/CEN mask extraction, registration.
-- **Neurofeedback** (Session 2): 12 runs (Transfer Pre, 5 Feedback, Transfer Post, 5 Feedback). Each run: MURFI receives volumes, operator presses D, PsychoPy ball task runs (150s).
-- **Test**: Dry-run with simulated data. Same flow as Localizer but no scanner or MURFI required.
-
-**Preflight checks** (13 total): FSL, Apptainer, MURFI container, subject directory, Ethernet interface, scanner ping, Wi-Fi off, ports 50000/15001 free, port binding, firewall rules for ports 50000 and 4006, stale process detection.
-
-## Codebase Structure
+Each session writes to `murfi/subjects/sub-XXX/ses-<type>/` with `func/`, `sourcedata/`, `derivatives/`, and `session_state.json`. Raw MURFI output lives in `sourcedata/murfi/img/`; on step completion the runner publishes a BIDS-named NIfTI under `func/` with a JSON sidecar.
 
 ```
-mindfulness-nf/
-+-- mindfulness_nf/                Python package (Textual TUI + orchestration)
-|   +-- config.py                  Frozen scanner and pipeline configuration
-|   +-- models.py                  Frozen dataclasses: TrafficLight, RunState, SessionState
-|   +-- quality.py                 Pure threshold functions (green/yellow/red)
-|   +-- orchestration/
-|   |   +-- preflight.py           13 async preflight checks
-|   |   +-- murfi.py               Apptainer container lifecycle, volume monitoring
-|   |   +-- dicom_receiver.py      pynetdicom async wrapper (port 4006)
-|   |   +-- psychopy.py            Subprocess launch, adaptive scale factor
-|   |   +-- ica.py                 FSL FEAT/MELODIC pipeline, mask extraction
-|   |   +-- registration.py        flirt/applywarp mask registration
-|   |   +-- subjects.py            Subject creation, session state, crash recovery
-|   +-- tui/
-|       +-- app.py                 Main Textual App
-|       +-- screens/               SubjectEntry, SessionSelect, Localizer, Process, NF, Test
-|       +-- widgets/               StatusLight, RunProgress, RunTable, LogPanel, PreflightChecklist
-|       +-- styles/app.tcss        Textual CSS
-+-- murfi/
-|   +-- scripts/                   Shell scripts (reference implementation, gradually deprecated)
-|   |   +-- run_session.sh         Session orchestrator (696 lines)
-|   |   +-- feedback.sh            MURFI step executor (730 lines)
-|   |   +-- test_pipeline.sh       Test levels 0-3
-|   |   +-- dicom_receiver.py      Standalone DICOM receiver
-|   |   +-- rsn_get.py             DMN/CEN IC selection
-|   |   +-- masks/                 MNI templates and network masks
-|   |   +-- fsl_scripts/           MELODIC ICA FSF templates
-|   +-- subjects/
-|   |   +-- template/              Subject directory template (XML configs, mask dirs)
-|   +-- dicom_input/               DICOM receiver output directory
-+-- psychopy/
-|   +-- balltask/                  Real-time neurofeedback ball task
-|       +-- rt-network_feedback.py PsychoPy feedback display (1080 lines)
-|       +-- murfi_activation_communicator.py  MURFI infoserver client
-|       +-- data/                  Per-subject CSV output
-+-- tests/                         349 tests
-+-- assets/                        Desktop icon
-+-- docs/superpowers/specs/        Design spec
+murfi/subjects/sub-001/ses-rt15/
+  session_state.json
+  func/sub-001_ses-rt15_task-feedback_run-01_bold.nii
+  sourcedata/murfi/{xml,img,log}/
+  sourcedata/psychopy/sub-001_ses-rt15_run01.csv
+  derivatives/masks/{DMN,CEN}.nii
 ```
 
-## Internal Design
-
-The Python package follows Functional Core + Imperative Shell (FCIS) architecture.
-
-**Functional core** (`models.py`, `quality.py`, `config.py`): Frozen dataclasses with `slots=True`, tuple collections, pure functions. Zero I/O imports. Tested without mocks.
-
-**Imperative shell** (`orchestration/`): Async I/O for subprocesses, network, filesystem. Uses `asyncio.TaskGroup` for parallel preflight checks, `asyncio.to_thread()` for blocking FSL calls. Tests mock only external I/O.
-
-**TUI layer** (`tui/`): Textual 8.x screens and widgets. Calls orchestration functions via Textual workers.
-
-### Neurofeedback session sequence
-
-| Run | Type | Feedback | Scale Factor |
-|-----|------|----------|-------------|
-| 1 | Transfer Pre | No | n/a |
-| 2-6 | Feedback 1-5 | Yes | Default 10.0, then adaptive |
-| 7 | Transfer Post | No | n/a |
-| 8-12 | Feedback 6-10 | Yes | Carries over from Run 6 |
-
-The adaptive scale factor reads the prior run's CSV. If mean hits per TR fall below 3, it multiplies by 1.25. If above 5, it multiplies by 0.75. If between 3 and 5, it stays unchanged.
-
-### MoCo safety
-
-`configure_moco()` verifies the `onlyReadMoCo` XML field before every MURFI launch. If the value is wrong, it corrects it and logs a warning. Only `2vol.xml` and `rtdmn.xml` have this field; `rest.xml` uses DICOM input.
-
-If scanner MoCo is ON but `onlyReadMoCo` is false (or vice versa), MURFI silently drops all incoming data.
-
-### Crash recovery
-
-A session state file (`.session_state.json`) records subject, session type, last completed step, and timestamp. On relaunch, the app offers to resume. Partial data from the interrupted step is discarded.
-
-## Protocol Constants
+## Protocol constants
 
 | Constant | Value |
 |----------|-------|
 | TR | 1.2 s |
-| 2-volume measurements | 20 |
-| Resting state measurements | 250 |
+| 2-volume measurements | 2 |
+| Resting-state measurements | 250 |
 | Feedback measurements | 150 |
 | PsychoPy run duration | 150 s |
 | ICA components | 128 |
@@ -202,44 +161,16 @@ A session state file (`.session_state.json`) records subject, session type, last
 | Infoserver port | 15001 |
 | MURFI container | /opt/murfi/apptainer-images/murfi.sif |
 
-## System Requirements
+## System requirements
 
 - **OS:** Ubuntu 22.04+
 - **Python:** 3.13+ (managed by uv at `/opt/uv/python/`)
 - **FSL:** 6+ at `/opt/fsl`
 - **Apptainer:** 1.3+
 - **MURFI:** v2.1.1 container at `/opt/murfi/apptainer-images/murfi.sif`
-- **Network:** Dedicated Ethernet to scanner on 192.168.2.x subnet; Wi-Fi must be off during sessions
+- **Network:** Dedicated Ethernet on 192.168.2.x subnet; Wi-Fi off during sessions
 - **Display:** Second monitor for PsychoPy (screen=1, 1920x1080)
 - **Firewall:** Ports 50000 and 4006 open from 192.168.2.0/24
-
-## Development
-
-```bash
-# Install with dev dependencies
-uv sync --extra dev
-
-# Run tests
-uv run pytest tests/ -x -q
-
-# Run TUI in test mode
-uv run mindfulness-nf --test
-
-# Run a specific test file
-uv run pytest tests/test_quality.py -v
-
-# Run TUI screen tests
-uv run pytest tests/tui/ -v
-```
-
-### Test structure
-
-| Layer | Tests | Mocks |
-|-------|-------|-------|
-| Functional core (`test_quality.py`, `test_models.py`, `test_config.py`) | Parametrized threshold and immutability tests | None |
-| Orchestration (`test_preflight.py`, `test_murfi.py`, etc.) | Subprocess and network behavior | External I/O only |
-| TUI (`tests/tui/`) | Screen transitions, keybindings, widget rendering | Orchestration calls |
-| Integration (`test_integration.py`) | Full app flow in dry-run mode | Preflight results |
 
 ## Provenance
 
@@ -248,14 +179,14 @@ Based on the rt-BPD codebase (Clemens Bauer, 2025) with these changes:
 | Change | Reason |
 |--------|--------|
 | Neurological orientation throughout | Eliminates LPS/neurological confusion in registration |
-| Melodic IC resampling (applywarp) | Fixes 74 to 68 slice dimension mismatch in multi-run ICA |
+| Melodic IC resampling (applywarp) | Fixes 74-to-68 slice dimension mismatch in multi-run ICA |
 | Bilateral CEN selection | Lateralization analysis picks most bilateral CEN component |
 | 4-voxel brain mask erosion | Keeps masks inside brain boundary |
-| Robust reference selection (ls -v) | Prevents wrong-file selection vs fragile ls -t |
-| Safe file operations (cp, rm -rf) | Prevents data loss from destructive mv |
+| Robust reference selection (`ls -v`) | Prevents wrong-file selection vs fragile `ls -t` |
+| Safe file operations (`cp`, `rm -rf`) | Prevents data loss from destructive `mv` |
 | ICA overwrite protection | Prevents accidental 25-minute re-runs |
 | Apptainer container at /opt/murfi | System-installed MURFI v2.1.1 |
 | Single-machine (localhost) | PsychoPy connects to MURFI on 127.0.0.1 |
-| BIDS subject IDs (sub-NNN) | Standard naming convention |
-| Textual TUI | Replaces zenity/bash/tmux interface |
+| BIDS subject IDs and session layout | Standard naming; `ls` reveals what ran |
+| Textual TUI with `SessionRunner` | Replaces zenity/bash/tmux; persists every transition; supports resume and dry-run |
 | Python 3.13, unified .venv | Single environment for TUI, orchestration, and PsychoPy |

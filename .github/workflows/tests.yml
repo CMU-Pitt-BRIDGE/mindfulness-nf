@@ -20,6 +20,9 @@ jobs:
         with:
           version: "latest"
       - name: Install dev deps
-        run: uv sync --extra dev
+        # ``dev`` lives in [dependency-groups] (PEP 735), not in
+        # [project.optional-dependencies]. Bare ``uv sync`` picks it up via
+        # the [tool.uv].default-groups setting in pyproject.toml.
+        run: uv sync
       - name: Run tests (L1+L2; L3 excluded - requires Apptainer)
         run: uv run pytest tests/ --ignore=tests/test_e2e_session.py -v

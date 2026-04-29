@@ -9,10 +9,7 @@ dependencies = [
     "nibabel>=5.0",
     "pydicom>=2.4",
     "pynetdicom>=3.0.4",
-    "psychopy",
     "scipy>=1.12",
-    "psychtoolbox",
-    "pygame",
     "textual>=8.0",
 ]
 
@@ -22,6 +19,20 @@ dependencies = [
 # up by default (see [tool.uv].default-groups).
 dry-run = [
     "nilearn>=0.10",
+]
+# Operator-side runtime deps. Required on the scanner PC where PsychoPy
+# launches the ball task and pygame/psychtoolbox handle hardware timing
+# and button-box input — but NOT needed for unit tests (which mock the
+# psychopy subprocess) or for the orchestrator-only modules. Installed
+# explicitly via ``uv sync --extra operator`` on the scanner PC.
+#
+# Excluded from base ``dependencies`` because wxpython (transitive via
+# psychopy) requires GTK+ headers to build from source on Linux runners
+# without prebuilt wheels — broke CI on 2026-04-29.
+operator = [
+    "psychopy",
+    "psychtoolbox",
+    "pygame",
 ]
 
 [dependency-groups]

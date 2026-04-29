@@ -824,7 +824,17 @@ for thisComponent in baselineComponents:
 #-------Start Routine "baseline"-------
 continueRoutine = True
 print("starting baseline")
-while continueRoutine and routineTimer.getTime() > 0:
+# Baseline loop: gate on frame count not just timer (regression: timer
+# expired before the 25th baseline TR was written; total run was 149/150).
+# BaseLineTime / TR = expected baseline volume count. Allow a 10s grace
+# beyond timer in case the last volume is late-arriving.
+_baseline_target_frames = int(round(BaseLineTime / expInfo['tr']))
+_baseline_start_frame = frame
+while (
+    continueRoutine
+    and (frame - _baseline_start_frame) < _baseline_target_frames
+    and routineTimer.getTime() > -10
+):
     # During baseline period, we still want to record MURFI outputs
     # get current time
     communicator.update()
@@ -922,13 +932,20 @@ pda_outlier=False
 last_acquired_frame_time = feedbackClock.getTime()
 continueRoutine = True
 # Loop keeps going until RUN_TIME is up
-while continueRoutine and routineTimer.getTime() > 0:
+# Loop exit gate: previously this was just ``routineTimer.getTime() > 0``,
+# which expires *exactly* at TR-150 wall-clock time and dropped the final
+# row (the script wrote 149/150 rows for every NF run on sub-morgan).
+# Volume index ``frame`` is the authoritative count — exit AFTER writing
+# the Nth volume, not when the timer hits zero. Keep the timer as a
+# fallback so we don't hang forever if MURFI stops producing data.
+_target_volumes = int(expInfo['Run_Time'])
+while continueRoutine and frame < _target_volumes and routineTimer.getTime() > -10:
     # get current time
     t = feedbackClock.getTime()
     run_stop_time=t
     frameN = frameN + 1  # number of completed frames (so 0 is the first frame)
     # update/draw components on each frame
-    
+
     # *subject_key_target* updates
     if t >= 0.0 and subject_key_target.status == NOT_STARTED:
         # keep track of start time/frame for later

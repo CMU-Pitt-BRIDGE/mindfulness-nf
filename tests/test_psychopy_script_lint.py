@@ -78,6 +78,33 @@ def test_overwrite_branch_does_not_hardcode_feedback_filename() -> None:
     )
 
 
+def test_feedback_loop_exit_gates_on_frame_count() -> None:
+    """Feedback + baseline loops must exit on frame-count, not just timer.
+
+    Regression: pure ``routineTimer.getTime() > 0`` exit dropped the final
+    TR — every NF run for sub-morgan wrote 149 rows for a 150-TR scan.
+    Loops now also gate on volume-count to ensure all expected TRs are
+    captured even when the timer expires slightly before the last
+    volume's MURFI delivery.
+    """
+    src = SCRIPT.read_text()
+    # The feedback-loop must reference the volume target in its while-condition.
+    assert re.search(
+        r"while\s+continueRoutine\s+and\s+frame\s*<\s*_target_volumes",
+        src,
+    ), (
+        "Feedback loop must gate on `frame < _target_volumes` (not just "
+        "routineTimer) so the final TR is captured."
+    )
+    # And the baseline loop too.
+    assert re.search(
+        r"while\s*\(?\s*\n?\s*continueRoutine\s*\n?\s*and\s+\(?frame\s*-\s*_baseline_start_frame\)?\s*<\s*_baseline_target_frames",
+        src,
+    ), (
+        "Baseline loop must gate on frame count vs _baseline_target_frames."
+    )
+
+
 def test_main_csv_psydat_rename_suffixed_to_canonical() -> None:
     """ExperimentHandler's ``_1`` suffix must be renamed away at end of run.
 

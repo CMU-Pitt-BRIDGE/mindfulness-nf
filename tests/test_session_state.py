@@ -453,9 +453,16 @@ def test_invariants_hold_over_random_sequences(ops: list[tuple[Any, ...]]) -> No
 
 def test_loc3_has_3_steps() -> None:
     from mindfulness_nf.sessions import LOC3
+    from mindfulness_nf.models import StepKind
 
     assert len(LOC3) == 3
     assert [s.name for s in LOC3] == ["Setup", "Rest 1", "Rest 2"]
+    # Rest runs are real-time; scanner streams via MURFI's vSend TCP input
+    # on port 50000. Port 4006 / DICOM is only for post-hoc transfers.
+    rest1 = next(s for s in LOC3 if s.name == "Rest 1")
+    rest2 = next(s for s in LOC3 if s.name == "Rest 2")
+    assert rest1.kind is StepKind.VSEND_SCAN
+    assert rest2.kind is StepKind.VSEND_SCAN
 
 
 def test_rt15_has_9_steps() -> None:

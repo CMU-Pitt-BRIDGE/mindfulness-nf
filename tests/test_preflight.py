@@ -27,6 +27,7 @@ from mindfulness_nf.orchestration.preflight import (
     check_scanner_reachable,
     check_stale_murfi_processes,
     check_subject_directory,
+    check_vsend_on_path,
     check_wifi_off,
     run_preflight,
 )
@@ -47,6 +48,16 @@ class TestCheckFslOnPath:
         with patch("mindfulness_nf.orchestration.preflight.shutil.which", return_value=None):
             result = asyncio.run(check_fsl_on_path())
         assert result == CheckResult(name="FSL on PATH", passed=False, message="FSL not on PATH")
+
+
+class TestCheckVsendOnPath:
+    """vSend is now an in-process Python sender; the check succeeds as
+    long as the module is importable (true by repo invariant)."""
+
+    def test_module_importable(self) -> None:
+        result = asyncio.run(check_vsend_on_path())
+        assert result.passed is True
+        assert "sender" in result.message.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -399,8 +410,8 @@ class TestCheckStaleMurfiProcesses:
 
 
 class TestRunPreflight:
-    def test_returns_13_results(self, tmp_path: Path) -> None:
-        """run_preflight returns exactly 13 CheckResult items."""
+    def test_returns_14_results(self, tmp_path: Path) -> None:
+        """run_preflight returns exactly 14 CheckResult items (incl. vSend)."""
         container = tmp_path / "murfi.sif"
         container.touch()
         config = ScannerConfig(murfi_container=str(container))
@@ -412,8 +423,10 @@ class TestRunPreflight:
         ):
             results = asyncio.run(run_preflight(config, subject_dir=None))
 
-        assert len(results) == 13
+        assert len(results) == 14
         assert all(isinstance(r, CheckResult) for r in results)
+        names = {r.name for r in results}
+        assert "vSend on PATH" in names
 
     def test_all_pass_when_healthy(self, tmp_path: Path) -> None:
         """When all external checks succeed, all results pass."""

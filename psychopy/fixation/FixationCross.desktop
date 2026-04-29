@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Fixation Cross (Resting State)
+GenericName=fMRI Fixation Target
+Comment=Thaler ABC fixation cross on BOLDscreen (display 2). ESC/Q to exit.
+Exec=/home/young-lab/code/mindfulness-nf/.venv/bin/python /home/young-lab/code/mindfulness-nf/psychopy/fixation/fixation_cross.py
+Path=/home/young-lab/code/mindfulness-nf
+Icon=view-fullscreen
+Terminal=false
+Categories=Science;
+Keywords=fMRI;fixation;rest;neurofeedback
+StartupNotify=true

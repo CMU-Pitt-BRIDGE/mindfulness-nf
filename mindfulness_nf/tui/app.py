@@ -94,11 +94,13 @@ class MindfulnessApp(App[None]):
         template_dir: Path | None = None,
         dry_run_cache_dir: Path | None = None,
         scanner_source: ScannerSource | None = None,
+        anchor: str = "",
     ) -> None:
         super().__init__()
         self.test_mode = test_mode
         self.dry_run = dry_run
         self.subject_override = subject_override
+        self.anchor = anchor
         self.scanner_config = scanner_config or ScannerConfig()
         self.pipeline_config = pipeline_config or PipelineConfig()
         self.subjects_dir = subjects_dir or _DEFAULT_SUBJECTS_DIR

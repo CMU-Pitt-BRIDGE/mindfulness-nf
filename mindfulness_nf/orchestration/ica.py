@@ -8,20 +8,35 @@ via ``asyncio.to_thread``.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from mindfulness_nf.config import PipelineConfig
+from mindfulness_nf.orchestration.layout import SubjectLayout
+
+# Force FSL to emit uncompressed NIfTI (*.nii), mirroring
+# ``export FSLOUTPUTTYPE=NIFTI`` in ``murfi/scripts/run_session.sh``.
+# Use direct assignment rather than ``setdefault`` because a sourced
+# ``/etc/profile.d/fsl.sh`` typically exports ``FSLOUTPUTTYPE=NIFTI_GZ``
+# into the parent shell — setdefault would respect that and we'd end up
+# with ``*.nii.gz`` outputs that downstream callers checking for ``*.nii``
+# report as "expected X.nii to exist".
+os.environ["FSLOUTPUTTYPE"] = "NIFTI"
 
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
 
-# Pattern for run-index images: img-00003-00042.nii means run 3, volume 42.
-_IMG_RE = re.compile(r"^img-(\d{5})-\d{5}\.nii$")
+# Post-rename step-keyed pattern for rest runs: img-rest-<run>-<vol>.nii.
+# Only files whose task label is "rest" are discoverable by MELODIC; this
+# is deliberate — Feedback/Transfer volumes (task=feedback, transferpre,
+# etc.) live in img/ but must not be merged into the resting-state 4D.
+_IMG_REST_RE = re.compile(r"^img-rest-(\d{2})-(\d{5})\.nii$")
 
 # Placeholders in the multi-run .fsf template.
 _MULTI_RUN_PLACEHOLDERS = ("DATA1", "DATA2", "OUTPUT", "REFERENCE_VOL")
@@ -43,21 +58,23 @@ class RunInfo:
 # ---------------------------------------------------------------------------
 
 
-async def list_runs(subject_dir: Path) -> tuple[RunInfo, ...]:
+async def list_runs(layout: SubjectLayout) -> tuple[RunInfo, ...]:
     """Scan the subject's ``img/`` directory for resting-state runs.
 
-    Each run is identified by its 5-digit run index in filenames like
-    ``img-00003-00001.nii``.  Returns a sorted tuple of :class:`RunInfo`.
+    Matches the post-rename task-keyed pattern ``img-rest-<run>-<vol>.nii``
+    — only files produced by steps with ``task="rest"`` are returned, so
+    Feedback / Transfer volumes (same directory, different task label)
+    are correctly excluded from the MELODIC input set.
     """
-    img_dir = subject_dir / "img"
+    img_dir = layout.img_dir
     if not img_dir.is_dir():
         return ()
 
-    # Group files by run index.
+    # Group by run index. Only task=rest files are matched.
     run_counts: dict[int, int] = {}
     entries = await asyncio.to_thread(list, img_dir.iterdir())
     for entry in entries:
-        m = _IMG_RE.match(entry.name)
+        m = _IMG_REST_RE.match(entry.name)
         if m:
             run_idx = int(m.group(1))
             run_counts[run_idx] = run_counts.get(run_idx, 0) + 1
@@ -75,7 +92,7 @@ async def list_runs(subject_dir: Path) -> tuple[RunInfo, ...]:
 
 
 async def merge_runs(
-    subject_dir: Path,
+    layout: SubjectLayout,
     run_indices: tuple[int, ...],
     *,
     tr: float = PipelineConfig().tr,
@@ -83,19 +100,21 @@ async def merge_runs(
     """Merge selected runs into 4-D NIfTI files using ``fslmerge``.
 
     For each run index, all matching ``img-<run>-*.nii`` volumes are merged
-    into ``<subject_dir>/rest/<subject>_ses-localizer_task-rest_run-<N>_bold.nii``.
-
-    Returns the path to the *first* merged run file (used as primary input).
+    into ``<rest_dir>/<bids_bold_name>``. ``rest_dir`` is SESSION-scoped
+    (``sub-X/ses-Y/rest/``) so two sessions cannot clobber each other's
+    merges. The BIDS filename uses ``layout.session_type`` — the hardcoded
+    ``ses-localizer`` that used to appear in producer and consumer code
+    has been removed everywhere.
     """
-    img_dir = subject_dir / "img"
-    rest_dir = subject_dir / "rest"
+    img_dir = layout.img_dir
+    rest_dir = layout.rest_dir
+    bold_name = layout.bold_bids_name
     rest_dir.mkdir(parents=True, exist_ok=True)
-    subject_name = subject_dir.name
-    ses = "ses-localizer"
 
     merged_paths: list[Path] = []
     for seq, run_idx in enumerate(run_indices, start=1):
-        pattern = f"img-{run_idx:05d}"
+        # Post-rename task-keyed pattern: img-rest-<run>-<vol>.nii.
+        pattern = f"img-rest-{run_idx:02d}-"
         volumes = sorted(
             p
             for p in await asyncio.to_thread(list, img_dir.iterdir())
@@ -105,9 +124,7 @@ async def merge_runs(
             msg = f"No volumes found for run index {run_idx} in {img_dir}"
             raise FileNotFoundError(msg)
 
-        out_path = (
-            rest_dir / f"{subject_name}_{ses}_task-rest_run-{seq:02d}_bold.nii"
-        )
+        out_path = rest_dir / bold_name(task="rest", run=seq)
         cmd = ["fslmerge", "-tr", str(out_path), *[str(v) for v in volumes], str(tr)]
         await asyncio.to_thread(
             subprocess.run, cmd, check=True, capture_output=True, text=True
@@ -118,7 +135,7 @@ async def merge_runs(
 
 
 async def run_ica(
-    subject_dir: Path,
+    layout: SubjectLayout,
     merged_paths: tuple[Path, ...],
     reference_vol: Path,
     *,
@@ -130,8 +147,9 @@ async def run_ica(
 
     Parameters
     ----------
-    subject_dir:
-        Subject directory (e.g. ``subjects/sub-001``).
+    layout:
+        :class:`SubjectLayout` for the current session. ``rest_dir`` is
+        session-scoped; the ``.fsf`` and ICA output live there.
     merged_paths:
         Tuple of 1 or 2 merged bold NIfTI paths (preprocessed).
     reference_vol:
@@ -146,7 +164,7 @@ async def run_ica(
     Returns
     -------
     Path
-        The ICA output directory (``<subject_dir>/rest/rs_network.gica``
+        The ICA output directory (``<rest_dir>/rs_network.gica``
         or ``rs_network.ica``).
     """
 
@@ -154,12 +172,8 @@ async def run_ica(
         if on_progress is not None:
             on_progress(msg)
 
-    rest_dir = subject_dir / "rest"
-    subject_name = subject_dir.name
-    ses = "ses-localizer"
-    run = "run-01"
-
-    fsf_out = rest_dir / f"{subject_name}_{ses}_task-rest_{run}_bold.fsf"
+    rest_dir = layout.rest_dir
+    fsf_out = rest_dir / layout.bold_bids_name(task="rest", run=1, suffix="bold.fsf")
     output_dir = rest_dir / "rs_network"
 
     _report("Generating .fsf design file")
@@ -182,13 +196,23 @@ async def run_ica(
     await asyncio.to_thread(fsf_out.write_text, fsf_content)
 
     _report("Running FEAT/MELODIC ICA")
-    await asyncio.to_thread(
-        subprocess.run,
-        ["feat", str(fsf_out)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    # FEAT launches a web browser (Firefox) at the end to display its report.
+    # Firefox inherits FEAT's stdout/stderr and keeps those pipes open long
+    # after FEAT itself exits — which makes ``subprocess.run(capture_output=True)``
+    # hang forever waiting for EOF on the pipe. Redirect to log files instead
+    # so pipe-holding GUI children never block our supervisor. The log files
+    # are still available in ``rest/`` for post-hoc debugging.
+    feat_stdout = rest_dir / "feat.stdout.log"
+    feat_stderr = rest_dir / "feat.stderr.log"
+
+    def _run_feat() -> None:
+        with feat_stdout.open("wb") as out, feat_stderr.open("wb") as err:
+            subprocess.run(
+                ["feat", str(fsf_out)],
+                check=True, stdout=out, stderr=err,
+            )
+
+    await asyncio.to_thread(_run_feat)
 
     # Determine actual output directory (FEAT appends .gica or .ica).
     if (output_dir.parent / "rs_network.gica").is_dir():
@@ -207,7 +231,7 @@ async def extract_masks(
     ica_dir: Path,
     template_dir: Path,
     *,
-    subject_dir: Path,
+    layout: SubjectLayout,
     examplefunc: Path,
     examplefunc_mask: Path,
     on_progress: Callable[[str], None] | None = None,
@@ -225,8 +249,9 @@ async def extract_masks(
     template_dir:
         Directory containing ``template_networks.nii``, ``DMNax_brainmaskero2.nii``,
         ``CENa_brainmaskero2.nii``, and ``MNI152_T1_2mm_brain``.
-    subject_dir:
-        Subject directory (e.g. ``subjects/sub-001``).
+    layout:
+        :class:`SubjectLayout` — produced masks land in ``mask_dir`` which
+        is subject-scoped (cross-session consumed by Real-Time).
     examplefunc:
         Skull-stripped median reference volume (native space).
     examplefunc_mask:
@@ -416,9 +441,23 @@ async def extract_masks(
     _report("Selecting DMN and CEN components")
     ica_version = "multi_run" if multi_run else "single_run"
     rsn_get_script = Path(__file__).resolve().parent.parent.parent / "murfi" / "scripts" / "rsn_get.py"
+    # Use ``sys.executable`` rather than the literal string ``python`` so
+    # the subprocess inherits the same interpreter (and site-packages) as
+    # our TUI. Shell's ``python`` resolves via pyenv, which breaks when
+    # ``.python-version`` specifies a version pyenv doesn't have locally —
+    # our uv-managed .venv has it, but only this Python process knows where.
+    # Pass ica_dir explicitly so rsn_get.py doesn't fall back to its legacy
+    # ``../subjects/<subj>/rest/rs_network.*`` hardcode — after the layout
+    # migration, ``rest/`` is session-scoped.
     await asyncio.to_thread(
         subprocess.run,
-        ["python", str(rsn_get_script), subject_dir.name, ica_version],
+        [
+            sys.executable,
+            str(rsn_get_script),
+            layout.subject_id,
+            ica_version,
+            str(ica_dir),
+        ],
         check=True,
         capture_output=True,
         text=True,
@@ -477,8 +516,10 @@ async def extract_masks(
             text=True,
         )
 
-    # Copy to subject mask directory.
-    mask_dir = subject_dir / "mask"
+    # Copy to subject mask directory. mask_dir is subject-scoped: masks
+    # produced in a Process session are consumed by later Real-Time
+    # sessions for the same subject.
+    mask_dir = layout.mask_dir
     mask_dir.mkdir(parents=True, exist_ok=True)
     dmn_native = mask_dir / "dmn_native_rest.nii"
     cen_native = mask_dir / "cen_native_rest.nii"

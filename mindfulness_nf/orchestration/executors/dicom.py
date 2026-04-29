@@ -17,10 +17,27 @@ from mindfulness_nf.orchestration.executor import (
     StepProgress,
 )
 from mindfulness_nf.orchestration.scanner_source import ScannerSource
+from mindfulness_nf.orchestration.subjects import (
+    rename_step_volumes,
+    snapshot_img_dir,
+)
 
 __all__ = ["DicomStepExecutor"]
 
 _VOLUME_LINE_RE = re.compile(r"received image from scanner")
+
+# Markers that indicate MURFI (or its apptainer wrapper) hit a fatal condition
+# but kept the process alive — e.g. failed XML parse, missing DICOM dir, or
+# apptainer bind failures. Detecting these lets the executor fail fast instead
+# of waiting forever for ``process.returncode`` to flip.
+_FATAL_LOG_MARKERS: tuple[str, ...] = ("ERROR:", "FATAL:")
+
+# Grace period after the scanner-source push task completes. MURFI's DICOM
+# watcher sometimes finalizes one short of the requested `measurements`
+# count (e.g. 249/250 for a 250-volume scan); once we've pushed everything
+# the scan is logically done, so we wait this long for MURFI to catch up
+# and accept ``received >= target-1`` as success.
+_POST_PUSH_GRACE_SECONDS = 10.0
 
 
 class DicomStepExecutor:
@@ -56,6 +73,8 @@ class DicomStepExecutor:
     # ---- public protocol -------------------------------------------------
 
     async def run(self, on_progress: ProgressCallback) -> StepOutcome:
+        # Snapshot img/ to key on-disk filenames to step.run post-success.
+        self._img_snapshot = snapshot_img_dir(self._subject_dir.parent)
         try:
             await self._start_dicom_receiver()
             await self._start_murfi()
@@ -67,16 +86,20 @@ class DicomStepExecutor:
                 error=f"startup failed: {exc}",
             )
 
-        # Kick off dcmsend (real scanner pushes on its own; simulator replays cache).
+        # Kick off the simulated push (RealScannerSource is a no-op — a real
+        # scanner pushes on its own). The receiver lives in *this* process,
+        # bound to 0.0.0.0:<dicom_port>, so the simulator must target
+        # localhost — passing ``scanner_ip`` (the MRI console's IP) would
+        # send the C-STORE to the scanner, not to our receiver.
         sc = self._scanner_config
         self._dicom_push_task = asyncio.create_task(
             self._scanner_source.push_dicom(
-                sc.scanner_ip, sc.dicom_port, sc.dicom_ae_title, self._config
+                "127.0.0.1", sc.dicom_port, sc.dicom_ae_title, self._config
             )
         )
 
         try:
-            return await self._monitor(on_progress)
+            outcome = await self._monitor(on_progress)
         except asyncio.CancelledError:
             await self._shutdown()
             return StepOutcome(
@@ -84,6 +107,18 @@ class DicomStepExecutor:
                 final_progress=self._snapshot(),
                 error="cancelled",
             )
+        if (
+            outcome.succeeded
+            and self._config.run is not None
+            and self._config.task is not None
+        ):
+            rename_step_volumes(
+                self._subject_dir.parent,
+                self._config.task,
+                self._config.run,
+                self._img_snapshot,
+            )
+        return outcome
 
     async def stop(self, timeout: float = 5.0) -> None:
         self._stopped = True
@@ -93,13 +128,12 @@ class DicomStepExecutor:
         if component == "murfi":
             async with self._relaunch_lock:
                 if self._murfi is not None:
-                    try:
-                        self._log_baseline = self._murfi.log_path.stat().st_size
-                    except OSError:
-                        self._log_baseline = 0
                     await murfi_mod.stop(self._murfi)
                     self._murfi = None
                 await self._start_murfi()
+                # ``murfi.start`` truncates the log; reset baseline so the
+                # monitor reads the fresh log from byte 0.
+                self._log_baseline = 0
         elif component == "dicom":
             async with self._relaunch_lock:
                 if self._dicom is not None:
@@ -118,11 +152,17 @@ class DicomStepExecutor:
 
     async def _start_murfi(self) -> None:
         assert self._config.xml_name is not None
+        xml_label = self._config.xml_name.removesuffix(".xml")
+        if self._config.task is not None and self._config.run is not None:
+            log_name = f"{xml_label}_{self._config.task}-{self._config.run:02d}"
+        else:
+            log_name = xml_label
         self._murfi = await murfi_mod.start(
             self._subject_dir,
             xml_name=self._config.xml_name,
             config=self._pipeline,
             scanner_config=self._scanner_config,
+            log_name=log_name,
         )
 
     async def _start_dicom_receiver(self) -> None:
@@ -134,6 +174,8 @@ class DicomStepExecutor:
         )
 
     async def _monitor(self, on_progress: ProgressCallback) -> StepOutcome:
+        push_done_at: float | None = None
+        loop = asyncio.get_event_loop()
         while True:
             if self._stopped:
                 await self._shutdown()
@@ -149,14 +191,43 @@ class DicomStepExecutor:
             new_text = await asyncio.to_thread(_read_from, murfi.log_path, self._log_baseline)
             if new_text:
                 self._log_baseline += len(new_text.encode())
+                fatal_line: str | None = None
                 for line in new_text.splitlines():
                     if _VOLUME_LINE_RE.search(line):
                         self._volumes += 1
                         on_progress(self._snapshot())
+                    elif fatal_line is None and any(
+                        line.lstrip().startswith(m) for m in _FATAL_LOG_MARKERS
+                    ):
+                        fatal_line = line.strip()
+                if fatal_line is not None:
+                    await self._shutdown()
+                    return StepOutcome(
+                        succeeded=False,
+                        final_progress=self._snapshot(),
+                        error=f"MURFI fatal: {fatal_line}",
+                    )
 
             if self._volumes >= self._target:
                 await self._shutdown()
                 return StepOutcome(succeeded=True, final_progress=self._snapshot())
+
+            # Post-push grace: once the scanner-source has delivered every
+            # DICOM and MURFI is within 1 of target, consider the scan done
+            # after a short quiescence window. Closes the MURFI-side
+            # off-by-one that used to hang at N-1/N.
+            push_task = self._dicom_push_task
+            if push_task is not None and push_task.done():
+                if push_done_at is None:
+                    push_done_at = loop.time()
+                elif (
+                    self._volumes >= self._target - 1
+                    and loop.time() - push_done_at >= _POST_PUSH_GRACE_SECONDS
+                ):
+                    await self._shutdown()
+                    return StepOutcome(
+                        succeeded=True, final_progress=self._snapshot()
+                    )
 
             if murfi.process.returncode is not None:
                 rc = murfi.process.returncode

@@ -47,6 +47,7 @@ from mindfulness_nf.orchestration.subjects import (
     clear_bids_run_files,
     load_bids_session_state,
     persist_bids_session_state,
+    write_provenance,
 )
 from mindfulness_nf.sessions import SESSION_CONFIGS
 
@@ -89,6 +90,7 @@ class SessionRunner:
         scanner_config: ScannerConfig,
         scanner_source: ScannerSource,
         dry_run: bool = False,
+        anchor: str = "",
     ) -> None:
         self._state = state
         self._subject_dir = subject_dir
@@ -96,6 +98,9 @@ class SessionRunner:
         self._scanner_config = scanner_config
         self._scanner_source = scanner_source
         self._dry_run = dry_run
+        # Mindfulness anchor phrase — shown during NF feedback. Empty
+        # string means "no anchor" (PsychoPy's default behavior).
+        self._anchor = anchor
 
         self._current_task: asyncio.Task[StepOutcome] | None = None
         self._current_executor: StepExecutor | None = None
@@ -104,6 +109,13 @@ class SessionRunner:
         # Persist the initial state so callers observing the file on disk
         # see a coherent snapshot from the first moment.
         self._persist(self._state)
+        # Stamp provenance (git SHA, host, argv) at session init. Best-effort:
+        # failures here don't break the pipeline. Overwrites on every run so
+        # the latest record reflects the current invocation.
+        try:
+            write_provenance(subject_dir)
+        except Exception:  # noqa: BLE001 — provenance is diagnostic, not critical
+            logger.exception("failed to write provenance.json")
 
     # ------------------------------------------------------------------
     # Classmethod constructor
@@ -118,6 +130,7 @@ class SessionRunner:
         scanner_config: ScannerConfig,
         scanner_source: ScannerSource,
         dry_run: bool = False,
+        anchor: str = "",
     ) -> SessionRunner:
         """Resume from ``session_state.json`` if present; else build fresh.
 
@@ -135,10 +148,11 @@ class SessionRunner:
         else:
             configs = SESSION_CONFIGS[session_type]
             now = _iso_now()
-            # Default subject id from the directory name; BIDS layout uses
-            # ``sub-<id>/ses-<type>/``.  Good enough for the runner; the TUI
-            # passes the intended subject via the preceding SessionState.
-            subject = subject_dir.name or "sub-unknown"
+            # ``subject_dir`` is the BIDS session dir (``sub-<id>/ses-<type>``).
+            # The subject name is the *parent* directory — ``subject_dir.name``
+            # would give ``ses-<type>``, which surfaces as a wrong subject id
+            # in session_state.json and in downstream MURFI env vars.
+            subject = subject_dir.parent.name or subject_dir.name or "sub-unknown"
             state = SessionState(
                 subject=subject,
                 session_type=session_type,
@@ -155,6 +169,7 @@ class SessionRunner:
             scanner_config=scanner_config,
             scanner_source=scanner_source,
             dry_run=dry_run,
+            anchor=anchor,
         )
 
     # ------------------------------------------------------------------
@@ -369,12 +384,25 @@ class SessionRunner:
                     scanner_source=self._scanner_source,
                 )
             case StepKind.NF_RUN:
+                # Duration is per-session: RT15 → 15min, RT30 → 30min.
+                # PsychoPy reads this to control block count / total TRs.
+                # The default "15min" on NfRunStepExecutor would cause RT30
+                # runs to use the 15-min paradigm — wrong stimulus timing.
+                duration_by_session = {
+                    "rt15": "15min",
+                    "rt30": "30min",
+                }
+                duration = duration_by_session.get(
+                    self._state.session_type, "15min"
+                )
                 return NfRunStepExecutor(
                     config=step,
                     subject_dir=self._subject_dir,
                     pipeline=self._pipeline,
                     scanner_config=self._scanner_config,
                     scanner_source=self._scanner_source,
+                    duration=duration,
+                    anchor=self._anchor,
                 )
             case StepKind.PROCESS_STAGE:
                 return FslStageExecutor(

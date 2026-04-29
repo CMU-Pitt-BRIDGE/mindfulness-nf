@@ -52,6 +52,9 @@ LOC3: tuple[StepConfig, ...] = (
         xml_name=None,
         kind=StepKind.SETUP,
     ),
+    # Rest runs are real-time — scanner pushes volumes via MURFI's vSend
+    # scanner-input TCP protocol on port 50000. DICOM (port 4006) is
+    # reserved for post-hoc transfers (selfref), not real-time rest.
     StepConfig(
         name="Rest 1",
         task="rest",
@@ -59,7 +62,7 @@ LOC3: tuple[StepConfig, ...] = (
         progress_target=250,
         progress_unit="volumes",
         xml_name="rest.xml",
-        kind=StepKind.DICOM_SCAN,
+        kind=StepKind.VSEND_SCAN,
     ),
     StepConfig(
         name="Rest 2",
@@ -68,7 +71,7 @@ LOC3: tuple[StepConfig, ...] = (
         progress_target=250,
         progress_unit="volumes",
         xml_name="rest.xml",
-        kind=StepKind.DICOM_SCAN,
+        kind=StepKind.VSEND_SCAN,
     ),
 )
 

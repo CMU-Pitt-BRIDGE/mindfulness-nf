@@ -52,6 +52,21 @@ class CheckResult:
 
 
 @dataclass(frozen=True, slots=True)
+class CleanupAction:
+    """Record of one remediation action taken during Setup.
+
+    Produced by ``orchestration.cleanup`` and surfaced alongside
+    :class:`CheckResult` in the Setup step's artifacts so the TUI can
+    show operators *what was killed* before the 13 preflight checks ran.
+    """
+
+    target: str
+    pid: int | None
+    killed: bool
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
 class RunState:
     """View model for a single run's progress (consumed by TUI widgets).
 

@@ -46,9 +46,20 @@ def _make_template_dir(tmp_path: Path) -> Path:
     template_dir = tmp_path / "template"
     xml_vsend = template_dir / "xml" / "xml_vsend"
     xml_vsend.mkdir(parents=True)
-    (xml_vsend / "2vol.xml").write_text("<config>2vol</config>")
-    (xml_vsend / "rtdmn.xml").write_text("<config>rtdmn</config>")
-    (xml_vsend / "rest.xml").write_text("<config>rest</config>")
+    (xml_vsend / "2vol.xml").write_text("<config>vsend 2vol</config>")
+    (xml_vsend / "rtdmn.xml").write_text("<config>vsend rtdmn</config>")
+    (xml_vsend / "rest.xml").write_text("<config>vsend rest</config>")
+
+    xml_dcm = template_dir / "xml" / "xml_dcm"
+    xml_dcm.mkdir(parents=True)
+    (xml_dcm / "2vol.xml").write_text("<config>dcm 2vol</config>")
+    (xml_dcm / "rtdmn.xml").write_text("<config>dcm rtdmn</config>")
+    (xml_dcm / "rest.xml").write_text(
+        '<scanner>\n'
+        '  <option name="imageSource"> DICOM </option>\n'
+        '  <option name="inputDicomDir"> /old/hardcoded/path </option>\n'
+        '</scanner>\n'
+    )
     return template_dir
 
 
@@ -79,7 +90,15 @@ class TestCreateSubjectSessionDir:
     def test_create_subject_session_dir_creates_bids_tree(
         self, tmp_path: Path
     ) -> None:
-        """Creates full BIDS tree and copies XML templates."""
+        """Creates the session tree and copies XML templates.
+
+        Regression: previously we also created ``func/``,
+        ``sourcedata/murfi/img/``, ``sourcedata/murfi/log/``, and
+        ``derivatives/masks/`` — none of which were ever written to.
+        Empty aspirational dirs misled anyone inspecting the layout; they
+        have been dropped. Only directories the pipeline actually writes
+        to are created here.
+        """
         subjects_dir = tmp_path / "subjects"
         subjects_dir.mkdir()
         template_dir = _make_template_dir(tmp_path)
@@ -91,19 +110,31 @@ class TestCreateSubjectSessionDir:
         assert session_dir == subjects_dir / "sub-001" / "ses-rt15"
         assert session_dir.is_dir()
 
+        # Directories that are genuinely written to by the pipeline:
         for sub in (
-            "func",
-            "sourcedata/murfi/xml",
-            "sourcedata/murfi/img",
-            "sourcedata/murfi/log",
-            "sourcedata/psychopy",
-            "derivatives",
+            "log",                          # MURFI + orchestrator logs
+            "rest",                         # Per-session 4D merges + preprocess
+            "qc",                           # Per-session QC overlays
+            "sourcedata/murfi/xml",         # Snapshot of XMLs-as-run
+            "sourcedata/psychopy",          # PsychoPy writes here directly
         ):
             assert (session_dir / sub).is_dir(), f"missing {sub}"
 
+        # Regression: these used to be created empty and confused RAs.
+        for dead in (
+            "func",
+            "sourcedata/murfi/img",
+            "sourcedata/murfi/log",
+            "derivatives/masks",
+        ):
+            assert not (session_dir / dead).exists(), (
+                f"{dead} must not be pre-created — only populated dirs "
+                f"should appear in the session tree"
+            )
+
         xml_dest = session_dir / "sourcedata" / "murfi" / "xml"
-        assert (xml_dest / "2vol.xml").read_text() == "<config>2vol</config>"
-        assert (xml_dest / "rtdmn.xml").read_text() == "<config>rtdmn</config>"
+        assert (xml_dest / "2vol.xml").read_text() == "<config>vsend 2vol</config>"
+        assert (xml_dest / "rtdmn.xml").read_text() == "<config>vsend rtdmn</config>"
 
     def test_create_subject_session_dir_idempotent_across_sessions(
         self, tmp_path: Path
@@ -123,6 +154,73 @@ class TestCreateSubjectSessionDir:
         assert loc3_dir.is_dir()
         assert rt15_dir.is_dir()
         assert loc3_dir != rt15_dir
+
+    def test_loc3_session_seeds_from_xml_vsend(self, tmp_path: Path) -> None:
+        """loc3 rest runs are real-time — scanner streams via vSend on
+        port 50000. Session must be seeded from xml_vsend/, NOT xml_dcm/.
+        Port 4006 / DICOM is reserved for post-hoc transfers (selfref).
+        """
+        subjects_dir = tmp_path / "subjects"
+        subjects_dir.mkdir()
+        template_dir = _make_template_dir(tmp_path)
+
+        session_dir = create_subject_session_dir(
+            subjects_dir, "sub-001", "loc3", template_dir
+        )
+
+        xml_dest = session_dir / "sourcedata" / "murfi" / "xml"
+        rest_content = (xml_dest / "rest.xml").read_text()
+        assert "vsend" in rest_content.lower(), (
+            f"expected vsend flavor, got: {rest_content!r}"
+        )
+
+    def test_rt15_session_seeds_from_xml_vsend(self, tmp_path: Path) -> None:
+        """rt15 uses vSend mode — session must be seeded from xml_vsend/."""
+        subjects_dir = tmp_path / "subjects"
+        subjects_dir.mkdir()
+        template_dir = _make_template_dir(tmp_path)
+
+        session_dir = create_subject_session_dir(
+            subjects_dir, "sub-001", "rt15", template_dir
+        )
+
+        xml_dest = session_dir / "sourcedata" / "murfi" / "xml"
+        assert "vsend" in (xml_dest / "2vol.xml").read_text()
+        assert "vsend" in (xml_dest / "rtdmn.xml").read_text()
+
+    def test_rt30_session_seeds_from_xml_vsend(self, tmp_path: Path) -> None:
+        """rt30 uses vSend mode — same flavor as rt15."""
+        subjects_dir = tmp_path / "subjects"
+        subjects_dir.mkdir()
+        template_dir = _make_template_dir(tmp_path)
+
+        session_dir = create_subject_session_dir(
+            subjects_dir, "sub-001", "rt30", template_dir
+        )
+
+        xml_dest = session_dir / "sourcedata" / "murfi" / "xml"
+        assert "vsend" in (xml_dest / "rtdmn.xml").read_text()
+
+    def test_inputDicomDir_rewrite_only_affects_xml_dcm_sessions(
+        self, tmp_path: Path
+    ) -> None:
+        """The inputDicomDir rewriter used to run for loc3 when loc3 was
+        DICOM-based. loc3 is now real-time vSend, so nothing in the seeded
+        XML should contain the rewrite (no DICOM path references)."""
+        subjects_dir = tmp_path / "subjects"
+        subjects_dir.mkdir()
+        template_dir = _make_template_dir(tmp_path)
+
+        session_dir = create_subject_session_dir(
+            subjects_dir, "sub-001", "loc3", template_dir
+        )
+
+        rest_xml = session_dir / "sourcedata" / "murfi" / "xml" / "rest.xml"
+        content = rest_xml.read_text()
+        assert "inputDicomDir" not in content, (
+            "vsend rest.xml must not reference inputDicomDir"
+        )
+        assert "/old/hardcoded/path" not in content
 
     def test_create_subject_session_dir_raises_on_duplicate_same_session(
         self, tmp_path: Path
@@ -381,10 +479,16 @@ def _feedback_step(run: int, series: int) -> StepConfig:
 
 
 class TestClearBidsRunFiles:
-    def test_clear_bids_run_files_removes_func_files(
+    def test_clear_bids_run_files_removes_rest_files(
         self, tmp_path: Path
     ) -> None:
-        """Removes both the BIDS NIfTI and its JSON sidecar."""
+        """Removes step's 4D merge + sidecars from session-scoped ``rest/``.
+
+        Regression: this test used to assert deletion under ``func/``. The
+        pipeline never wrote 4D BOLDs to ``func/`` — it writes to
+        ``<session_dir>/rest/`` (session-scoped post-migration) and
+        ``func/`` is reserved for a future BIDSify symlink step.
+        """
         step = StepConfig(
             name="Feedback 2",
             task="feedback",
@@ -397,12 +501,12 @@ class TestClearBidsRunFiles:
         )
         nii = (
             tmp_path
-            / "func"
+            / "rest"
             / "sub-001_ses-rt15_task-feedback_run-02_bold.nii"
         )
         sidecar = (
             tmp_path
-            / "func"
+            / "rest"
             / "sub-001_ses-rt15_task-feedback_run-02_bold.json"
         )
         _write(nii)
@@ -413,46 +517,58 @@ class TestClearBidsRunFiles:
         assert not nii.exists()
         assert not sidecar.exists()
 
-    def test_clear_bids_run_files_removes_sourcedata_img_files_for_step_series(
+    def test_clear_bids_run_files_removes_task_keyed_img_files(
         self, tmp_path: Path
     ) -> None:
-        """Removes raw MURFI volumes for the step's series (series = step.run)."""
-        # Step index 2 in the original mapping → series 3.
+        """Removes raw MURFI volumes for the step's (task, run) from subject-root ``img/``.
+
+        Regression: ``clear_bids_run_files`` used to glob ``img-<run:05d>-*.nii``
+        (run-only keying). That matched Rest 1 (ses-loc3, run=1) when the
+        operator restarted Transfer Pre (ses-rt15, run=1) — sub-morgan's
+        Rest 1 data was wiped as a side-effect, 2026-04-21. The glob now
+        keys on (task, run) so only this step's files get deleted.
+        """
         step = _feedback_step(run=3, series=3)
-        img_dir = tmp_path / "sourcedata" / "murfi" / "img"
+        session_dir = tmp_path / "sub-001" / "ses-rt15"
+        session_dir.mkdir(parents=True)
+        img_dir = tmp_path / "sub-001" / "img"
+        # This step's own files (task=feedback, run=3):
         for i in (1, 2, 3):
-            _write(img_dir / f"img-00003-{i:05d}.nii")
+            _write(img_dir / f"img-feedback-03-{i:05d}.nii")
+        # Another task's files that must survive:
+        _write(img_dir / "img-rest-01-00001.nii")
+        _write(img_dir / "img-rest-01-00002.nii")
 
-        clear_bids_run_files(tmp_path, "sub-001", "rt15", step)
+        clear_bids_run_files(session_dir, "sub-001", "rt15", step)
 
-        assert list(img_dir.glob("img-00003-*.nii")) == []
+        assert list(img_dir.glob("img-feedback-03-*.nii")) == []
+        # Other task's files untouched — this is the anti-regression.
+        assert len(list(img_dir.glob("img-rest-01-*.nii"))) == 2
 
     def test_clear_bids_run_files_does_not_touch_other_steps_data(
         self, tmp_path: Path
     ) -> None:
         """Clearing step 2 leaves step 3's files intact."""
         step2 = _feedback_step(run=2, series=2)
-        img_dir = tmp_path / "sourcedata" / "murfi" / "img"
-        _write(img_dir / "img-00002-00001.nii")
-        _write(img_dir / "img-00002-00002.nii")
-        _write(img_dir / "img-00003-00001.nii")
-        _write(img_dir / "img-00003-00002.nii")
+        session_dir = tmp_path / "sub-001" / "ses-rt15"
+        session_dir.mkdir(parents=True)
+        img_dir = tmp_path / "sub-001" / "img"
+        _write(img_dir / "img-feedback-02-00001.nii")
+        _write(img_dir / "img-feedback-02-00002.nii")
+        _write(img_dir / "img-feedback-03-00001.nii")
+        _write(img_dir / "img-feedback-03-00002.nii")
 
-        func_dir = tmp_path / "func"
-        step2_nii = (
-            func_dir / "sub-001_ses-rt15_task-feedback_run-02_bold.nii"
-        )
-        step3_nii = (
-            func_dir / "sub-001_ses-rt15_task-feedback_run-03_bold.nii"
-        )
+        rest_dir = session_dir / "rest"
+        step2_nii = rest_dir / "sub-001_ses-rt15_task-feedback_run-02_bold.nii"
+        step3_nii = rest_dir / "sub-001_ses-rt15_task-feedback_run-03_bold.nii"
         _write(step2_nii)
         _write(step3_nii)
 
-        clear_bids_run_files(tmp_path, "sub-001", "rt15", step2)
+        clear_bids_run_files(session_dir, "sub-001", "rt15", step2)
 
         # Step 2 wiped.
-        assert list(img_dir.glob("img-00002-*.nii")) == []
+        assert list(img_dir.glob("img-feedback-02-*.nii")) == []
         assert not step2_nii.exists()
         # Step 3 untouched.
-        assert len(list(img_dir.glob("img-00003-*.nii"))) == 2
+        assert len(list(img_dir.glob("img-feedback-03-*.nii"))) == 2
         assert step3_nii.exists()

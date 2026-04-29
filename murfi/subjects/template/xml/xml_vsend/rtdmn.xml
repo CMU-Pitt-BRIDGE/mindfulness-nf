@@ -8,6 +8,12 @@
   <option name="tr">             1.2 </option>
   <option name="measurements">   150 </option>
   <option name="port">           50000 </option>
+  <!-- `save` is the disk-write toggle; `saveImages` is the in-memory
+       accept toggle. Both must be true for raw volumes to land on disk.
+       rest.xml had both; rtdmn.xml used to have only saveImages, which
+       silently kept volumes in memory for processing but never wrote
+       img-*.nii — sub-morgan's 7 rt15 runs produced no raw NIfTIs. -->
+  <option name="save">           true </option>
   <option name="saveImages">     true </option>
   <option name="receiveImages">  true </option>
   <option name="onlyReadMoCo">  true </option>

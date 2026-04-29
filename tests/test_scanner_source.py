@@ -104,13 +104,14 @@ class TestNoOpScannerSource:
 
 
 class TestSimulatedScannerSourceVsend:
-    """push_vsend shells out to the vSend binary with cached volumes."""
+    """push_vsend streams cached NIfTIs to MURFI's scanner port via the
+    in-process Python sender. No external binary required.
+    """
 
     @pytest.mark.asyncio
-    async def test_launches_vsend_subprocess(
+    async def test_push_vsend_invokes_python_sender_with_cached_volumes(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Prime cache with two fake NIfTI files.
         nifti_dir = tmp_path / "nifti"
         nifti_dir.mkdir()
         vol_a = nifti_dir / "001.nii.gz"
@@ -118,55 +119,28 @@ class TestSimulatedScannerSourceVsend:
         vol_a.touch()
         vol_b.touch()
 
-        # Pretend vSend is on PATH.
-        monkeypatch.setattr(
-            "mindfulness_nf.orchestration.scanner_source.shutil.which",
-            lambda _name: "/usr/local/bin/vSend",
-        )
+        captured: dict = {}
 
-        # Mock the subprocess: exits cleanly.
-        proc = MagicMock()
-        proc.returncode = 0
-        proc.wait = AsyncMock(return_value=0)
-        proc.terminate = MagicMock()
+        def _fake_sender(host, port, nifti_paths, tr_seconds):
+            captured["host"] = host
+            captured["port"] = port
+            captured["paths"] = tuple(nifti_paths)
+            captured["tr"] = tr_seconds
 
-        create = AsyncMock(return_value=proc)
         monkeypatch.setattr(
-            "mindfulness_nf.orchestration.scanner_source.asyncio.create_subprocess_exec",
-            create,
+            "mindfulness_nf.orchestration.scanner_source._send_nifti_via_vsend",
+            _fake_sender,
         )
 
         source = SimulatedScannerSource(cache_dir=tmp_path, tr_seconds=1.2)
         xml = tmp_path / "2vol.xml"
         await source.push_vsend(xml, tmp_path, _step())
 
-        assert create.await_count == 1
-        called_args = create.await_args.args
-        assert called_args[0] == "/usr/local/bin/vSend"
-        # The two cache volumes appear in the command.
-        assert str(vol_a) in called_args
-        assert str(vol_b) in called_args
-        # The xml path is forwarded.
-        assert str(xml) in called_args
-
-    @pytest.mark.asyncio
-    async def test_push_vsend_noop_when_binary_missing(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(
-            "mindfulness_nf.orchestration.scanner_source.shutil.which",
-            lambda _name: None,
-        )
-        create = AsyncMock()
-        monkeypatch.setattr(
-            "mindfulness_nf.orchestration.scanner_source.asyncio.create_subprocess_exec",
-            create,
-        )
-
-        source = SimulatedScannerSource(cache_dir=tmp_path)
-        await source.push_vsend(tmp_path / "x.xml", tmp_path, _step())
-
-        create.assert_not_called()
+        assert captured["host"] == "127.0.0.1"
+        assert captured["port"] == 50000
+        assert captured["tr"] == 1.2
+        assert vol_a in captured["paths"]
+        assert vol_b in captured["paths"]
 
 
 class TestSimulatedScannerSourceSynthesis:
@@ -176,20 +150,15 @@ class TestSimulatedScannerSourceSynthesis:
     async def test_auto_synthesizes_when_cache_empty(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(
-            "mindfulness_nf.orchestration.scanner_source.shutil.which",
-            lambda _name: "/usr/local/bin/vSend",
-        )
-        proc = MagicMock()
-        proc.returncode = 0
-        proc.wait = AsyncMock(return_value=0)
-        proc.terminate = MagicMock()
-        create = AsyncMock(return_value=proc)
-        monkeypatch.setattr(
-            "mindfulness_nf.orchestration.scanner_source.asyncio.create_subprocess_exec",
-            create,
-        )
+        sent_paths: list[Path] = []
 
+        def _capture_sender(host, port, nifti_paths, tr_seconds):
+            sent_paths.extend(nifti_paths)
+
+        monkeypatch.setattr(
+            "mindfulness_nf.orchestration.scanner_source._send_nifti_via_vsend",
+            _capture_sender,
+        )
         # Isolate from any populated real-BOLD cache on the developer's machine
         # (murfi/dry_run_cache_bold/). Point it at a non-existent dir so the
         # 3-tier lookup skips it and falls through to synthesis.
@@ -198,47 +167,32 @@ class TestSimulatedScannerSourceSynthesis:
         )
 
         source = SimulatedScannerSource(cache_dir=tmp_path)
-        # _step() above sets progress_target=2 so we expect 2 synthesized files.
         await source.push_vsend(tmp_path / "x.xml", tmp_path, _step())
 
         nifti_dir = tmp_path / "nifti"
         generated = sorted(nifti_dir.glob("*.nii*"))
         assert len(generated) == 2
-        # The generated files made it into the vSend command.
-        called_args = create.await_args.args
         for g in generated:
-            assert str(g) in called_args
+            assert g in sent_paths
 
     @pytest.mark.asyncio
     async def test_preserves_existing_cache(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Pre-populate cache with a single pretend-real volume.
         nifti_dir = tmp_path / "nifti"
         nifti_dir.mkdir()
         existing = nifti_dir / "prerecorded_0001.nii.gz"
         existing.write_bytes(b"REAL_DATA_MARKER")
 
         monkeypatch.setattr(
-            "mindfulness_nf.orchestration.scanner_source.shutil.which",
-            lambda _name: "/usr/local/bin/vSend",
-        )
-        proc = MagicMock()
-        proc.returncode = 0
-        proc.wait = AsyncMock(return_value=0)
-        proc.terminate = MagicMock()
-        create = AsyncMock(return_value=proc)
-        monkeypatch.setattr(
-            "mindfulness_nf.orchestration.scanner_source.asyncio.create_subprocess_exec",
-            create,
+            "mindfulness_nf.orchestration.scanner_source._send_nifti_via_vsend",
+            lambda *_a, **_kw: None,
         )
 
         source = SimulatedScannerSource(cache_dir=tmp_path)
         await source.push_vsend(tmp_path / "x.xml", tmp_path, _step())
 
-        # Existing file is still there, unchanged.
         assert existing.read_bytes() == b"REAL_DATA_MARKER"
-        # No synthetic file was generated.
         contents = sorted(p.name for p in nifti_dir.iterdir())
         assert contents == ["prerecorded_0001.nii.gz"]
 
@@ -256,8 +210,6 @@ class TestSimulatedScannerSourceSynthesis:
 
         BOLD cache must take priority over synthesis (tier 2 > tier 3).
         """
-        # Build the real-BOLD cache location inside tmp_path and monkeypatch
-        # the class attribute to point at it.
         bold_cache = tmp_path / "dry_run_cache_bold"
         bold_nifti_dir = bold_cache / "nifti"
         bold_nifti_dir.mkdir(parents=True)
@@ -265,91 +217,163 @@ class TestSimulatedScannerSourceSynthesis:
         bold_vol.write_bytes(b"REAL_BOLD_DATA")
 
         monkeypatch.setattr(SimulatedScannerSource, "BOLD_CACHE_DIR", bold_cache)
-
-        # The explicit cache_dir is intentionally empty -> fallback kicks in.
         explicit_cache = tmp_path / "explicit"
         explicit_cache.mkdir()
 
+        sent_paths: list[Path] = []
+
+        def _capture_sender(host, port, nifti_paths, tr_seconds):
+            sent_paths.extend(nifti_paths)
+
         monkeypatch.setattr(
-            "mindfulness_nf.orchestration.scanner_source.shutil.which",
-            lambda _name: "/usr/local/bin/vSend",
-        )
-        proc = MagicMock()
-        proc.returncode = 0
-        proc.wait = AsyncMock(return_value=0)
-        proc.terminate = MagicMock()
-        create = AsyncMock(return_value=proc)
-        monkeypatch.setattr(
-            "mindfulness_nf.orchestration.scanner_source.asyncio.create_subprocess_exec",
-            create,
+            "mindfulness_nf.orchestration.scanner_source._send_nifti_via_vsend",
+            _capture_sender,
         )
 
         source = SimulatedScannerSource(cache_dir=explicit_cache)
         await source.push_vsend(tmp_path / "x.xml", tmp_path, _step())
 
-        # The BOLD volume is in the vSend command.
-        called_args = create.await_args.args
-        assert str(bold_vol) in called_args
-
-        # No synthetic volume was written to the explicit cache's nifti dir.
+        assert bold_vol in sent_paths
         explicit_nifti = explicit_cache / "nifti"
         assert not explicit_nifti.exists() or not any(explicit_nifti.iterdir())
-
-        # BOLD file is intact.
         assert bold_vol.read_bytes() == b"REAL_BOLD_DATA"
 
 
-class TestSimulatedScannerSourceCancel:
-    """cancel() terminates every tracked subprocess and reaps it."""
+class TestSimulatedScannerSourcePushVsendPython:
+    """push_vsend must deliver via the in-process Python sender; no
+    ``vSend`` binary required. Mirror fix for the dcmsend/pynetdicom cycle.
+    """
 
     @pytest.mark.asyncio
-    async def test_cancel_terminates_subprocess(
+    async def test_push_vsend_uses_python_sender_not_subprocess(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Prime cache.
-        nifti_dir = tmp_path / "nifti"
-        nifti_dir.mkdir()
-        (nifti_dir / "001.nii.gz").touch()
-
+        # vSend binary not present.
         monkeypatch.setattr(
             "mindfulness_nf.orchestration.scanner_source.shutil.which",
-            lambda _name: "/usr/local/bin/vSend",
+            lambda _name: None,
         )
+        # Subprocess must not be launched.
+        called_exec = False
 
-        # Build a proc that "runs forever" until terminate() is called.
-        done = asyncio.Event()
+        async def _fail_exec(*_a, **_kw):
+            nonlocal called_exec
+            called_exec = True
+            raise AssertionError("subprocess should not be launched")
 
-        proc = MagicMock()
-        proc.returncode = None
-        proc.terminate = MagicMock(side_effect=lambda: done.set())
-        proc.kill = MagicMock()
-
-        async def _wait() -> int:
-            await done.wait()
-            proc.returncode = 0
-            return 0
-
-        proc.wait = AsyncMock(side_effect=_wait)
-
-        create = AsyncMock(return_value=proc)
         monkeypatch.setattr(
             "mindfulness_nf.orchestration.scanner_source.asyncio.create_subprocess_exec",
-            create,
+            _fail_exec,
         )
 
+        # Python sender receives the call.
+        captured: dict = {}
+
+        def _fake_sender(host, port, nifti_paths, tr_seconds):
+            captured["host"] = host
+            captured["port"] = port
+            captured["paths"] = tuple(nifti_paths)
+            captured["tr"] = tr_seconds
+
+        monkeypatch.setattr(
+            "mindfulness_nf.orchestration.scanner_source._send_nifti_via_vsend",
+            _fake_sender,
+        )
+
+        # Prime a cache with two NIfTI placeholders.
+        cache = tmp_path / "cache"
+        (cache / "nifti").mkdir(parents=True)
+        (cache / "nifti" / "vol-001.nii").write_bytes(b"\x00")
+        (cache / "nifti" / "vol-002.nii").write_bytes(b"\x00")
+
+        source = SimulatedScannerSource(cache_dir=cache, tr_seconds=0.01)
+        step = _step()
+        xml = tmp_path / "2vol.xml"
+        xml.write_text("<xml/>")
+
+        await source.push_vsend(xml_path=xml, subject_dir=tmp_path, step=step)
+
+        assert called_exec is False
+        assert captured["host"] == "127.0.0.1"
+        assert captured["port"] == 50000
+        assert len(captured["paths"]) == 2
+
+
+class TestSimulatedScannerSourcePushDicom:
+    """push_dicom must deliver DICOMs without requiring an external binary.
+
+    The old implementation shelled out to ``dcmsend`` from ``dcmtk``; if
+    the binary was absent on PATH, the simulator was a silent no-op and
+    MURFI saw no volumes — which is exactly the bug that landed the user
+    stuck on "Rest 1 running" with zero progress.
+    """
+
+    @pytest.mark.asyncio
+    async def test_push_dicom_delivers_to_receiver_without_external_binary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from mindfulness_nf.orchestration.dicom_receiver import DicomReceiver
+
+        # dcmsend MUST NOT be required — the new impl is pure-Python.
+        monkeypatch.setattr(
+            "mindfulness_nf.orchestration.scanner_source.shutil.which",
+            lambda _name: None,
+        )
+
+        # Receiver on an ephemeral port, writing to tmp_path/out/.
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        receiver = await DicomReceiver.start(
+            output_dir=out_dir, port=0, ae_title="MURFITEST"
+        )
+        # pynetdicom exposes the bound port via the server's socket.
+        assert receiver._server is not None  # sanity for the test
+        port = receiver._server.socket.getsockname()[1]
+        assert port > 0
+
+        # Prime the cache with three synthetic DICOMs.
+        cache = tmp_path / "cache"
+        source = SimulatedScannerSource(cache_dir=cache, tr_seconds=0.01)
+        step = StepConfig(
+            name="rest",
+            task="rest",
+            run=1,
+            progress_target=3,
+            progress_unit="volumes",
+            xml_name="rest.xml",
+            kind=StepKind.DICOM_SCAN,
+        )
+
+        try:
+            await source.push_dicom("127.0.0.1", port, "MURFITEST", step)
+            # Allow the server a beat to flush writes.
+            for _ in range(50):
+                if len(list(out_dir.glob("*.dcm"))) >= 3:
+                    break
+                await asyncio.sleep(0.05)
+        finally:
+            await receiver.stop()
+
+        delivered = sorted(out_dir.glob("*.dcm"))
+        assert len(delivered) == 3, (
+            f"expected 3 DICOMs delivered, got {len(delivered)}"
+        )
+
+
+class TestSimulatedScannerSourceCancel:
+    """cancel() is still used to terminate any remaining subprocess
+    launched by the DICOM-flavor path (historical ``_spawn_and_wait``)
+    and is a safe no-op when no subprocess is outstanding.
+
+    The vSend path now uses an in-process Python sender (no subprocess);
+    cancel()'s effect there is indirect (the caller cancels the wrapping
+    task, which raises CancelledError inside ``asyncio.to_thread``).
+    """
+
+    @pytest.mark.asyncio
+    async def test_cancel_noop_when_nothing_to_terminate(
+        self, tmp_path: Path
+    ) -> None:
         source = SimulatedScannerSource(cache_dir=tmp_path)
-
-        # Start the push in the background; it will block on proc.wait().
-        push_task = asyncio.create_task(
-            source.push_vsend(tmp_path / "x.xml", tmp_path, _step())
-        )
-        # Yield control so the push registers its subprocess.
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-
+        # Should complete without raising even with no active subprocess.
         await source.cancel()
-
-        proc.terminate.assert_called_once()
-
-        # The push task should now complete (wait() returns after terminate).
-        await asyncio.wait_for(push_task, timeout=1.0)

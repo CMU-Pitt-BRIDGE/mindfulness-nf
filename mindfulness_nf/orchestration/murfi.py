@@ -52,6 +52,7 @@ async def start(
     config: PipelineConfig,
     *,
     scanner_config: ScannerConfig | None = None,
+    log_name: str | None = None,
 ) -> MurfiProcess:
     """Launch MURFI inside an Apptainer container.
 
@@ -66,6 +67,16 @@ async def start(
         future per-run overrides).
     scanner_config:
         Optional scanner configuration.  Defaults to ``ScannerConfig()``.
+    log_name:
+        Optional unique label for this invocation's log file — produces
+        ``murfi_<log_name>.log`` under ``ses-<TYPE>/log/``. Defaults to the
+        XML basename, but callers running the same XML multiple times in
+        one session (e.g. Transfer Pre + Feedback 1-5 + Transfer Post all
+        using ``rtdmn.xml``) should pass a step-unique label like
+        ``"rtdmn_feedback-02"`` so each step's log is preserved. Without
+        this, every MURFI restart truncates the shared ``murfi_rtdmn.log``
+        and only the last step's log survives (regression lost sub-morgan's
+        first six rt15 step logs, 2026-04-21).
 
     Returns
     -------
@@ -73,15 +84,24 @@ async def start(
         Handle that must be passed to :func:`stop` when done.
     """
     sc = scanner_config or ScannerConfig()
-    xml_path = subject_dir / "xml" / xml_name
-    subjects_dir = subject_dir.parent
-    subject_name = subject_dir.name
+    # ``subject_dir`` in the runner convention is actually the BIDS session
+    # dir (``.../subjects/sub-XXX/ses-YYY``). MURFI and apptainer expect:
+    #   * the subjects *root* for MURFI_SUBJECTS_DIR / --bind
+    #   * the subject name (``sub-XXX``) for MURFI_SUBJECT_NAME
+    # Apptainer also rejects a relative --bind destination, so resolve.
+    session_dir = subject_dir.resolve()
+    subject_root = session_dir.parent
+    subjects_dir = subject_root.parent
+    subject_name = subject_root.name
 
-    log_dir = subject_dir / "log"
+    xml_path = session_dir / "sourcedata" / "murfi" / "xml" / xml_name
+
+    log_dir = session_dir / "log"
     log_dir.mkdir(parents=True, exist_ok=True)
-    label = xml_name.removesuffix(".xml")
+    label = log_name if log_name else xml_name.removesuffix(".xml")
     log_path = log_dir / f"murfi_{label}.log"
-    # Truncate any previous log.
+    # Truncate any previous log (same step re-run gets a clean slate;
+    # different steps pass a unique ``log_name`` so they don't clobber).
     log_path.write_bytes(b"")
 
     # Build the Apptainer command, mirroring run_session.sh's run_murfi().

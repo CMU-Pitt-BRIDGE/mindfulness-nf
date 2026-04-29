@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Fixation Cross — TEST (visibility check)
+GenericName=fMRI Fixation Target — Test Mode
+Comment=OVERSIZED 6x target with warning banner. For pre-session BOLDscreen verification only — DO NOT use during a scan.
+Exec=/home/young-lab/code/mindfulness-nf/.venv/bin/python /home/young-lab/code/mindfulness-nf/psychopy/fixation/fixation_cross.py --test
+Path=/home/young-lab/code/mindfulness-nf
+Icon=dialog-warning
+Terminal=false
+Categories=Science;
+Keywords=fMRI;fixation;test;verify;BOLDscreen
+StartupNotify=true

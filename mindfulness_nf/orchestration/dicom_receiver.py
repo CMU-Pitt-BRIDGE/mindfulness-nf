@@ -20,9 +20,20 @@ logger = logging.getLogger(__name__)
 
 
 def _handle_store(event: evt.Event, output_dir: str) -> int:
-    """Handle incoming C-STORE request — save DICOM to output directory."""
+    """Handle incoming C-STORE request — save DICOM to output directory.
+
+    Writes a fully-compliant DICOM file (128-byte preamble + ``DICM`` magic
+    + File Meta Information + dataset). Wire-received datasets have no
+    preamble, so ``save_as`` in default ``write_like_original=True`` mode
+    would produce files dcm2niix rejects as "Not a DICOM image".
+    """
     ds = event.dataset
     ds.file_meta = event.file_meta
+    # Ensure a preamble is present so save_as() emits a standard-compliant
+    # file. Without this, dcm2niix (and MURFI's upstream dicom_reader) reject
+    # the file at the byte-128 magic check.
+    if not getattr(ds, "preamble", None):
+        ds.preamble = b"\x00" * 128
 
     filename = f"{ds.SOPInstanceUID}.dcm"
     filepath = Path(output_dir) / filename

@@ -152,19 +152,33 @@ default_scale_factor = 10
 # another interal scale factor to make sure scaling of feedback is appropriate (higher means ball moves up/down more SLOWLY)
 internal_scaler=10
 
-# Setup files for saving
-if not os.path.isdir('data'):
-    os.makedirs('data')  # if this fails (e.g. permissions) we will get error
+# Setup files for saving. Root data dir comes from the orchestrator env
+# var MINDFULNESS_NF_PSYCHOPY_DATA_DIR so behavioral data lands inside the
+# subject session tree (sub-X/ses-Y/sourcedata/psychopy/). Falls back to
+# the legacy sibling ``data/`` dir when run standalone.
+_DATA_ROOT = os.environ.get('MINDFULNESS_NF_PSYCHOPY_DATA_DIR', 'data')
+if not os.path.isdir(_DATA_ROOT):
+    os.makedirs(_DATA_ROOT)  # if this fails (e.g. permissions) we will get error
 
-if not os.path.exists(f"data/{expInfo['participant']}"):
-    os.mkdir(f"data/{expInfo['participant']}")
+_participant_dir = os.path.join(_DATA_ROOT, expInfo['participant'])
+if not os.path.exists(_participant_dir):
+    os.makedirs(_participant_dir)
 
 
-# output file string (different depending on if feedback is being offered)
-if expInfo['feedback_on']=='Feedback':
-    filename = f"data/{expInfo['participant']}" + os.path.sep + '%s_DMN_Feedback_%s' %(expInfo['participant'],expInfo['run'])
+# output file string. When the orchestrator supplies ``MINDFULNESS_NF_TASK``
+# (transferpre, transferpost, feedback), include the task label in the
+# filename so Transfer Pre (run=1) and Transfer Post (run=1) don't collide
+# on ``<subject>_DMN_No_Feedback_1_*`` — they're different BIDS tasks with
+# independent run counters. Without the task label the script fell back to
+# PsychoPy's file-exists overwrite dialog, which could destroy a prior run.
+# Standalone invocations (no env var) keep the legacy naming.
+_env_task = os.environ.get('MINDFULNESS_NF_TASK')
+if _env_task:
+    filename = os.path.join(_participant_dir, '%s_DMN_%s_%s' % (expInfo['participant'], _env_task, expInfo['run']))
+elif expInfo['feedback_on']=='Feedback':
+    filename = os.path.join(_participant_dir, '%s_DMN_Feedback_%s' % (expInfo['participant'], expInfo['run']))
 elif expInfo['feedback_on']=='No Feedback':
-    filename = f"data/{expInfo['participant']}" + os.path.sep + '%s_DMN_No_Feedback_%s' %(expInfo['participant'],expInfo['run'])
+    filename = os.path.join(_participant_dir, '%s_DMN_No_Feedback_%s' % (expInfo['participant'], expInfo['run']))
 
 
 # if filepath already exists, stop run and check with user
@@ -182,12 +196,14 @@ while os.path.exists(filename + '_roi_outputs.csv'):
 
     # If not canceling, set filename
     else:
-        # If not overwriting, set filename to next run
-        if f"Overwrite Run {int(expInfo['run'])}" not in warning_box_data:
-            expInfo['run'] = int(expInfo['run']) +1 
-            filename = f"data/{expInfo['participant']}" + os.path.sep + '%s_DMN_Feedback_%s' %(expInfo['participant'],expInfo['run'])
-        # If overwriting, keep current filename
-        elif f"Overwrite Run {int(expInfo['run'])}" in warning_box_data:
+        # warning_box_data is a dict-like with key 'run_choice'. Earlier we
+        # accidentally used `in warning_box_data`, which checks dict KEYS,
+        # not values — so the overwrite branch never executed and every
+        # overwrite choice silently fell through to "next run" AND also
+        # hardcoded `_DMN_Feedback_` regardless of feedback_on. Read the
+        # value explicitly and preserve the feedback branch.
+        chosen = warning_box_data['run_choice'] if 'run_choice' in warning_box_data else warning_box_data[0]
+        if chosen == f"Overwrite Run {int(expInfo['run'])}":
             print('OVERWRITE')
             print(filename)
             os.remove(f'{filename}_slider_questions.csv')
@@ -195,6 +211,14 @@ while os.path.exists(filename + '_roi_outputs.csv'):
             os.remove(f'{filename}.csv')
             os.remove(f'{filename}.psydat')
             break
+        else:
+            expInfo['run'] = int(expInfo['run']) + 1
+            if _env_task:
+                filename = os.path.join(_participant_dir, '%s_DMN_%s_%s' % (expInfo['participant'], _env_task, expInfo['run']))
+            elif expInfo['feedback_on'] == 'Feedback':
+                filename = os.path.join(_participant_dir, '%s_DMN_Feedback_%s' % (expInfo['participant'], expInfo['run']))
+            else:
+                filename = os.path.join(_participant_dir, '%s_DMN_No_Feedback_%s' % (expInfo['participant'], expInfo['run']))
 
 # If first run, use default scale factor
 # Otherwise, adjust scale factor up/down if needed
@@ -204,17 +228,36 @@ if int(expInfo['run']) == 1:
 else:
     try:
 
-        # loop through prior runs, starting at most recent, until the most recent prior run with at least 140 volumes is found
-        # label this most recent run with 140+ volumes as the "last run" to pull parameters from
+        # Find the previous run's _roi_outputs.csv. Legacy code did
+        # ``filename.replace("Feedback_<N>", "Feedback_<N-1>")`` — that
+        # only matches the case-sensitive ``Feedback_`` literal. With
+        # task-based naming (``..._feedback_<N>``, ``..._transferpre_1``,
+        # etc.) that .replace is a no-op, so the adaptive loop read
+        # its OWN filename (0 rows) → last_run_complete=False → no
+        # adjustment. sub-morgan confirmed: every run's scale_factor
+        # was the default 10.0, even when Feedback 5 hit 6 dmn (over
+        # max_hits=5 → should have decreased).
+        #
+        # Fix: swap the numeric run suffix at the end of `filename`
+        # directly, regardless of the task label preceding it.
         last_run_complete=False
         last_run_counter=1
-        while last_run_complete==False and last_run_counter < int(expInfo['run']):
-            last_run_filename = filename.replace("Feedback_" + str(expInfo['run']), 
-                                                 "Feedback_" + str(int(expInfo['run'])-last_run_counter)) + '_roi_outputs.csv'
+        current_run_int = int(expInfo['run'])
+        while last_run_complete==False and last_run_counter < current_run_int:
+            prior_run = current_run_int - last_run_counter
+            # Replace trailing ``_<run>`` with ``_<prior>`` using rsplit so
+            # only the final token changes (robust to task labels that
+            # happen to contain digits).
+            base, _, _suffix = filename.rpartition('_')
+            last_run_filename = f"{base}_{prior_run}_roi_outputs.csv"
             print(last_run_filename)
             print(expInfo['run'])
             print(expInfo['participant'])
-            last_run_info = pd.read_csv(last_run_filename)
+            try:
+                last_run_info = pd.read_csv(last_run_filename)
+            except (FileNotFoundError, OSError):
+                last_run_counter += 1
+                continue
             if last_run_info.shape[0] > 140:
                 last_run_complete=True
             else:
@@ -285,8 +328,16 @@ logging.console.setLevel(logging.WARNING)  # this outputs to the screen, not a f
 endExpNow = False  # flag for 'escape' or other condition => quit the exp
 
 # Start Code - component code to be run before the window creation
-# Setup the Window
-win = visual.Window(size=(1920,1080), fullscr=True, screen=1, allowGUI=False, allowStencil=False,
+# Setup the Window. Screen index is configurable via MINDFULNESS_NF_SCREEN
+# env var (default 1 = secondary display at the scanner). If PsychoPy is
+# opening on a monitor you can't see (single-monitor laptop, wrong HDMI
+# order, etc.) the 't' trigger never registers because the fullscreen
+# window can't receive keyboard focus. Set MINDFULNESS_NF_SCREEN=0 to
+# open on the primary display.
+_screen = int(os.environ.get('MINDFULNESS_NF_SCREEN', '1'))
+print(f'[trigger] Opening PsychoPy window on screen={_screen}. '
+      f'Override with MINDFULNESS_NF_SCREEN=0 for primary display.')
+win = visual.Window(size=(1920,1080), fullscr=True, screen=_screen, allowGUI=False, allowStencil=False,
     monitor='testMonitor', color=[-1,-1,-1], colorSpace='rgb',
     blendMode='avg', useFBO=True,
     )
@@ -585,8 +636,18 @@ feedback_run1_text2 = "Try to focus mostly on the Noting Practice by being aware
 feedback_later_runs_text = "Great job! Next, you’ll get to practice Noting for another 2.5min with more brain feedback from the ball. \
 \n\nWhen the ball moves upwards, that corresponds to the Noting Practice."
 
-no_feedback_later_runs_text = "Great job! Next, you’ll get to practice Noting for another 2.5min. \
-\nThis time the ball and circles will not move, so you don’t need to check them."
+# Transfer Post: mirrors the anchor-reminder paragraph from Transfer Pre
+# (no_feedback_run1_text). Pre and Post are the baseline/retest pair for
+# the transfer-of-training measure — they MUST be the same intervention
+# condition so any Pre→Post difference reflects training, not instruction
+# asymmetry. The anchor reminder is the subject's intended cognitive tool
+# for the Noting practice; showing it at both timepoints keeps the baseline
+# identical. Feedback runs deliberately omit the anchor text because the
+# moving ball is the attentional focus there.
+no_feedback_later_runs_text = f"Great job! Next, you’ll get to practice Noting for another 2.5min. \
+\n\nYou mentioned using your {expInfo['anchor']} as an anchor for your Noting Practice. \
+Try to continue using this as your anchor, but it is also okay to switch anytime.\
+\n\nThis time the ball and circles will not move, so you don’t need to check them."
 
 # Depending on whether feedback is offered/which run it is -- show different instruction slides
 if expInfo['feedback_on'] == "No Feedback":
@@ -617,6 +678,18 @@ print ("murfi communicator ok")
 
 thisExp.addData('temporal_resolution', expInfo['tr'])
 
+
+# Force keyboard focus onto the PsychoPy window. pyglet-backed PsychoPy
+# only receives keys when its window is the focused OS window. On Linux
+# with fullscr=True + allowGUI=False the window has no title bar to click,
+# so if another app grabbed focus at launch time (common on a scanner PC
+# where the operator was just typing in the TUI terminal), manual 't' +
+# scanner triggers go nowhere. activate() forces focus programmatically.
+# Wrapped: older pyglet builds or non-pyglet backends may not expose it.
+try:
+    win.winHandle.activate()
+except Exception:
+    pass
 
 #------Prepare to start Routine "trigger"-------
 t = 0
@@ -658,10 +731,32 @@ while continueRoutine:
         key_resp_3.clock.reset()  # now t=0
         event.clearEvents(eventType='keyboard')
     if key_resp_3.status == STARTED:
-        theseKeys = event.getKeys(keyList=['t','+','5', 5])
-        
-        # check for quit:
-        if "escape" in theseKeys:
+        # Grab ALL keys — not a filtered keyList — so we can (a) see
+        # whether the window is actually receiving keyboard input and
+        # (b) diagnose when the scanner is sending a different code
+        # than the legacy ['t','+','5'] list. Every key seen is appended
+        # to a debug log next to the run's data files (the TUI pipes
+        # psychopy stdout, so prints would be invisible).
+        _all_keys = event.getKeys()
+        if _all_keys:
+            try:
+                with open(os.path.join(_participant_dir, 'trigger_debug.log'), 'a') as _df:
+                    _df.write(f'{time.time():.3f}\t{_all_keys}\n')
+            except Exception:
+                pass  # diagnostic only — never crash the run
+            # Also echo on-screen so operator can see live without tailing a file.
+            waiting_for_trigger_text.setText(
+                'Waiting for MRI trigger (t / + / 5)...\n\n'
+                f'Last key seen: {_all_keys[-1]!r}'
+            )
+            theseKeys = [k for k in _all_keys if k in ('t', '+', '5')]
+        else:
+            theseKeys = []
+
+        # check for quit (check the raw key stream, not the filtered
+        # theseKeys — we need to catch escape even when the scanner hasn't
+        # started firing trigger chars).
+        if "escape" in _all_keys:
             endExpNow = True
         if len(theseKeys) > 0:  # at least one key was pressed
             key_resp_3.keys = theseKeys[-1]  # just the last key pressed
@@ -1111,5 +1206,17 @@ next_feedback_condition = expInfo['feedback_condition']
 # Shut down psychopy before starting next run
 quit_psychopy()
 
+# PsychoPy's ExperimentHandler appends a `_1` counter to its main csv /
+# psydat filenames when something already exists at the same base (our
+# manually-written `_roi_outputs.csv` / `_slider_questions.csv` trigger
+# its duplicate detection). Rename back to the canonical names so the
+# main experiment file is `<filename>.csv`, not `<filename>_1.csv`.
+for _ext in ('.csv', '.psydat'):
+    _suffixed = filename + '_1' + _ext
+    _canonical = filename + _ext
+    if os.path.exists(_suffixed) and not os.path.exists(_canonical):
+        os.rename(_suffixed, _canonical)
+
 # Quit python
-sys.exit('Done with run')
+print('Done with run')
+sys.exit(0)

@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from mindfulness_nf.orchestration.dicom_receiver import DicomReceiver
+from mindfulness_nf.orchestration.dicom_receiver import DicomReceiver, _handle_store
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +43,58 @@ class TestVolumeCount:
             output_dir=tmp_path, port=4006, ae_title="MURFI", server=MagicMock(),
         )
         assert receiver.volume_count() == 1
+
+
+# ---------------------------------------------------------------------------
+# _handle_store — saved file must be a valid DICOM (preamble + DICM magic)
+# ---------------------------------------------------------------------------
+
+
+class TestHandleStoreWritesCompliantDicom:
+    """dcm2niix (and every DICOM parser) requires a 128-byte preamble
+    followed by the ``DICM`` magic at bytes 128-132. Files saved without
+    them were rejected as ``Not a DICOM image`` by the MURFI container's
+    dcm2niix, so MURFI never converted any volume.
+    """
+
+    def test_saved_file_has_preamble_and_dicm_magic(
+        self, tmp_path: Path
+    ) -> None:
+        """Reproduces what pynetdicom delivers at the handler: an
+        ``event.dataset`` *without* a preamble (preamble isn't transmitted
+        over the wire). Previous handler called ``save_as`` in the default
+        ``write_like_original=True`` mode, which skips the preamble when
+        the dataset has none — producing files that dcm2niix rejects.
+        """
+        from mindfulness_nf.orchestration.synthetic_volumes import (
+            generate_synthetic_dicom,
+        )
+
+        src = tmp_path / "source.dcm"
+        generate_synthetic_dicom(src, series_number=1, instance_number=1)
+        import pydicom
+
+        ds = pydicom.dcmread(src)
+        # Simulate a wire-received dataset: no preamble.
+        ds.preamble = None
+
+        event = MagicMock()
+        event.dataset = ds
+        event.file_meta = ds.file_meta
+
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        _handle_store(event, str(out_dir))
+
+        written = next(out_dir.glob("*.dcm"))
+        data = written.read_bytes()
+        assert len(data) > 132, "file too short to contain preamble + DICM"
+        assert data[:128] == b"\x00" * 128, (
+            f"preamble missing or non-zero at bytes 0..127: first 16={data[:16]!r}"
+        )
+        assert data[128:132] == b"DICM", (
+            f"expected DICM magic at offset 128, got {data[128:132]!r}"
+        )
 
 
 # ---------------------------------------------------------------------------

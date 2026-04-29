@@ -14,6 +14,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Label, Static
 
 from mindfulness_nf.models import (
+    CheckResult,
     Color,
     RunState,
     StepKind,
@@ -33,6 +34,31 @@ _CHECKMARK = "\u2713"
 _ARROW = "\u25b6"
 _CIRCLE = "\u25cb"
 _XMARK = "\u2717"
+
+
+def _checks_from_artifacts(artifacts: dict | None) -> tuple[CheckResult, ...]:
+    """Extract ``CheckResult`` tuples from SETUP step artifacts.
+
+    SETUP stores check rows as ``{"name", "passed", "message"}`` dicts.
+    Returns an empty tuple before the step has completed or if the shape
+    is unexpected — callers display an empty checklist.
+    """
+    if not isinstance(artifacts, dict):
+        return ()
+    checks = artifacts.get("checks")
+    if not isinstance(checks, tuple):
+        return ()
+    result: list[CheckResult] = []
+    for row in checks:
+        if isinstance(row, dict) and {"name", "passed", "message"} <= row.keys():
+            result.append(
+                CheckResult(
+                    name=str(row["name"]),
+                    passed=bool(row["passed"]),
+                    message=str(row["message"]),
+                )
+            )
+    return tuple(result)
 
 
 def _step_state_to_run_state(step: StepState) -> RunState:
@@ -220,6 +246,8 @@ class SessionScreen(Screen[None]):
         try:
             preflight = self.query_one("#session-preflight", PreflightChecklist)
             preflight.display = is_setup
+            if is_setup:
+                preflight.set_results(_checks_from_artifacts(step.artifacts))
             progress = self.query_one("#session-run-progress", RunProgress)
             progress.display = not is_setup
             progress.update(_step_state_to_run_state(step))

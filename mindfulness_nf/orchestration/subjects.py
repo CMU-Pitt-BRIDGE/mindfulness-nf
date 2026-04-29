@@ -9,7 +9,8 @@ This module hosts both the **legacy flat-layout helpers** (``save_session_state`
 **BIDS-layout helpers** used by :class:`SessionRunner`
 (``create_subject_session_dir``, ``bids_session_dir``, ``session_state_path``,
 ``load_bids_session_state``, ``persist_bids_session_state``, ``bids_func_path``,
-``clear_bids_run_files``). New code should use the BIDS helpers.
+``clear_bids_run_files``, ``write_provenance``). New code should use the
+BIDS helpers.
 """
 
 from __future__ import annotations
@@ -17,7 +18,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import platform
+import re
 import shutil
+import socket
+import subprocess
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,8 +39,98 @@ from mindfulness_nf.models import (
 
 logger = logging.getLogger(__name__)
 
-# Volume filename pattern produced by MURFI: img-SSSSS-VVVVV.nii
-_VOLUME_GLOB = "img-*-*.nii"
+# MURFI's native output pattern: img-SSSSS-VVVVV.nii (series, volume indexes).
+# Fresh MURFI processes always start at series 1, so successive steps would
+# collide on the same series in the shared subject-scoped img/ dir.
+_MURFI_NATIVE_GLOB = "img-[0-9]*-[0-9]*.nii"
+_MURFI_NATIVE_RE = re.compile(r"^img-(\d{5})-(\d{5})\.nii$")
+
+# Post-rename pattern: img-<task>-<run>-<vol>.nii. Task label + run-number
+# is unique across the subject: Rest 1 (ses-loc3, task=rest, run=1) lives
+# at img-rest-01-*.nii; Transfer Pre (ses-rt15, task=transferpre, run=1)
+# lives at img-transferpre-01-*.nii. No cross-task collisions possible.
+# Regression (see subject sub-morgan data loss, 2026-04-21): previously
+# rename keyed on just step.run, so Rest 1 + Transfer Pre + Feedback 1 +
+# Transfer Post — all run=1 — all wrote to img-00001-* and overwrote each
+# other. Restarting any of them also deleted all the others via
+# ``clear_bids_run_files`` matching on just run number.
+_STEP_KEYED_RE = re.compile(r"^img-([a-z0-9]+)-(\d{2})-(\d{5})\.nii$")
+
+
+def snapshot_img_dir(subject_dir: Path) -> frozenset[Path]:
+    """Return the set of files currently in ``<subject_dir>/img/``.
+
+    Used as a baseline before launching a MURFI-driven step. Compare with a
+    fresh listing after the step ends to identify files MURFI wrote during
+    this run — those get renamed via :func:`rename_step_volumes`.
+
+    Snapshots BOTH the native MURFI-output pattern (``img-SSSSS-VVVVV.nii``)
+    and the post-rename step-keyed pattern (``img-<task>-<run>-<vol>.nii``)
+    so that re-runs of a completed step correctly identify which files
+    MURFI produced in *this* attempt.
+    """
+    img_dir = subject_dir / "img"
+    if not img_dir.is_dir():
+        return frozenset()
+    # Any img-*.nii that isn't MURFI's native curact/design output.
+    result: set[Path] = set()
+    for p in img_dir.glob("img-*.nii"):
+        if _MURFI_NATIVE_RE.match(p.name) or _STEP_KEYED_RE.match(p.name):
+            result.add(p)
+    return frozenset(result)
+
+
+def rename_step_volumes(
+    subject_dir: Path,
+    task: str,
+    run_number: int,
+    pre_existing: frozenset[Path],
+) -> int:
+    """Rename MURFI's native output to task+run-keyed format.
+
+    After a MURFI-driven step completes, files MURFI wrote during the step
+    follow the ``img-<series>-<vol>.nii`` pattern (series counter per
+    MURFI process). This helper moves them to ``img-<task>-<run>-<vol>.nii``
+    so that (a) successive steps can't overwrite each other by sharing a
+    series number, and (b) ``clear_bids_run_files`` can delete only the
+    files for a specific ``(task, run)`` without touching other steps'
+    data from prior sessions.
+
+    ``task`` must be a short lowercase label (e.g. ``"rest"``,
+    ``"feedback"``, ``"transferpre"``). ``run_number`` is the step's
+    task-scoped run index (1-based).
+
+    Returns the number of files renamed. Files whose names already match
+    the target pattern for this (task, run) are skipped silently
+    (idempotent).
+    """
+    img_dir = subject_dir / "img"
+    if not img_dir.is_dir():
+        return 0
+    # New files = those MURFI just wrote (not in pre_existing) that still
+    # match MURFI's native pattern. Files already in post-rename pattern
+    # from an earlier attempt are skipped.
+    all_now = {p for p in img_dir.glob("img-*.nii") if _MURFI_NATIVE_RE.match(p.name)}
+    new_files = sorted(all_now - pre_existing)
+    renamed = 0
+    for src in new_files:
+        match = _MURFI_NATIVE_RE.match(src.name)
+        if match is None:
+            continue
+        vol_idx = match.group(2)
+        dst_name = f"img-{task}-{run_number:02d}-{vol_idx}.nii"
+        dst = img_dir / dst_name
+        # Overwrite is safe here: the destination, if it exists, is from a
+        # prior attempt of this *same* (task, run). A deliberate re-run
+        # wants the latest attempt.
+        src.replace(dst)
+        renamed += 1
+    return renamed
+
+
+def step_volume_glob(task: str, run_number: int) -> str:
+    """Glob pattern for one step's task+run-keyed volumes."""
+    return f"img-{task}-{run_number:02d}-*.nii"
 
 # JSON schema version for BIDS session_state.json.  Bump when shape changes.
 _SCHEMA_VERSION = 1
@@ -315,33 +411,116 @@ def create_subject_session_dir(
         msg = f"Subject-session directory already exists: {session_dir}"
         raise FileExistsError(msg)
 
-    # Subject-level directory + sessions.tsv stub (idempotent).
+    # Subject-level directory + sessions.tsv (idempotent; appends one row
+    # per session_type so an RA can see session ordering without opening
+    # each session_state.json).
     subject_dir.mkdir(parents=True, exist_ok=True)
     sessions_tsv = subject_dir / f"{subject_id}_sessions.tsv"
-    if not sessions_tsv.exists():
+    existing_ids: set[str] = set()
+    if sessions_tsv.exists():
+        with sessions_tsv.open() as fh:
+            for i, line in enumerate(fh):
+                if i == 0 or not line.strip():
+                    continue
+                parts = line.rstrip("\n").split("\t")
+                if parts:
+                    existing_ids.add(parts[0])
+    else:
         sessions_tsv.write_text("session_id\tacq_time\n")
+    session_id = f"ses-{session_type}"
+    if session_id not in existing_ids:
+        with sessions_tsv.open("a") as fh:
+            fh.write(f"{session_id}\t{datetime.now(timezone.utc).isoformat()}\n")
 
-    # Session subtree.
+    # Subject-level README: copy the docs template at subject creation so
+    # an RA who inherits only the subject dir can interpret every file.
+    readme_dst = subject_dir / "README.md"
+    if not readme_dst.exists():
+        readme_src = (
+            Path(__file__).resolve().parents[2]
+            / "docs" / "SUBJECT_README_TEMPLATE.md"
+        )
+        if readme_src.is_file():
+            try:
+                shutil.copy2(readme_src, readme_dst)
+            except OSError:
+                logger.warning("failed to copy README template to %s", readme_dst)
+
+    # Session subtree. Only the directories that are *actually* written to:
+    # - log/                     MURFI + orchestrator logs for this session
+    # - rest/                    Per-session 4D merges + preprocessing
+    # - qc/                      Per-session QC overlays
+    # - sourcedata/murfi/xml/    Snapshot of XMLs-as-run
+    # - sourcedata/psychopy/     Behavioral data (PsychoPy writes here directly)
+    #
+    # Previously we also created func/, derivatives/masks/, sourcedata/murfi/img/,
+    # and sourcedata/murfi/log/ — none were ever populated, so they confused
+    # anyone inspecting the layout ("is data missing?"). Removed.
     session_dir.mkdir(parents=True)
     for sub in (
-        "func",
+        "log",
+        "rest",
+        "qc",
         "sourcedata/murfi/xml",
-        "sourcedata/murfi/img",
-        "sourcedata/murfi/log",
         "sourcedata/psychopy",
-        "derivatives/masks",
     ):
         (session_dir / sub).mkdir(parents=True, exist_ok=True)
 
-    # Copy XML templates into sourcedata/murfi/xml/.
-    xml_source = template_dir / "xml" / "xml_vsend"
+    # Copy XML templates into sourcedata/murfi/xml/. The flavor depends on
+    # the session type: ``loc3`` uses DICOM mode (rest-state runs ingest
+    # DICOMs via a receiver); ``rt15`` / ``rt30`` use vSend (NIfTI streamed
+    # by MURFI's scanner emulator). ``process`` has no scanner step.
+    flavor = _xml_flavor_for(session_type)
     xml_dest = session_dir / "sourcedata" / "murfi" / "xml"
-    if xml_source.is_dir():
-        for src_file in xml_source.iterdir():
-            if src_file.is_file():
-                shutil.copy2(src_file, xml_dest / src_file.name)
+    if flavor is not None:
+        xml_source = template_dir / "xml" / flavor
+        if xml_source.is_dir():
+            for src_file in xml_source.iterdir():
+                if src_file.is_file():
+                    shutil.copy2(src_file, xml_dest / src_file.name)
+        # For DICOM-flavor XMLs, point MURFI at the per-session receiver
+        # output dir. The template has a hardcoded path that would send
+        # MURFI watching the wrong directory.
+        if flavor == "xml_dcm":
+            dicom_receiver_dir = (session_dir / "sourcedata" / "dicom").resolve()
+            for xml_file in xml_dest.glob("*.xml"):
+                _rewrite_input_dicom_dir(xml_file, dicom_receiver_dir)
 
     return session_dir
+
+
+_INPUT_DICOM_DIR_RE = re.compile(
+    r'(<option\s+name="inputDicomDir"\s*>)[^<]*(</option>)'
+)
+
+
+def _rewrite_input_dicom_dir(xml_file: Path, target: Path) -> bool:
+    """Rewrite ``<option name="inputDicomDir">...</option>`` in *xml_file*
+    to point at *target*. Returns True if the file was modified."""
+    content = xml_file.read_text()
+    new_content, subs = _INPUT_DICOM_DIR_RE.subn(
+        rf"\g<1> {target} \g<2>", content
+    )
+    if subs == 0 or new_content == content:
+        return False
+    xml_file.write_text(new_content)
+    return True
+
+
+def _xml_flavor_for(session_type: str) -> str | None:
+    """Return the template XML subdirectory name for a given session type,
+    or ``None`` if the session doesn't need MURFI XMLs (e.g. ``process``).
+
+    All session types that do real-time acquisition use ``xml_vsend`` —
+    rest in loc3 streams via MURFI's scanner TCP input on port 50000, same
+    as 2vol/rtdmn in rt15/rt30. ``xml_dcm`` is reserved for post-hoc DICOM
+    workflows (currently not wired to any session).
+    """
+    match session_type:
+        case "loc3" | "rt15" | "rt30":
+            return "xml_vsend"
+        case _:
+            return None
 
 
 # ---- session_state.json (de)serialization ---------------------------------
@@ -504,12 +683,11 @@ def clear_bids_run_files(
 
     Deletes:
 
-    * Everything under ``<session_dir>/func/`` whose name starts with
+    * Everything under ``<session_dir>/rest/`` whose name starts with
       ``<subject>_ses-<session_type>_task-<task>_run-<NN>_bold`` — i.e. the
-      NIfTI and its JSON sidecar.
-    * Raw MURFI volumes in ``<session_dir>/sourcedata/murfi/img/`` for the
-      step's series number (1-based; zero-padded to 5 digits) *if* the step
-      config exposes ``run``.
+      4D merge + FSL-preprocessing intermediates.
+    * Raw MURFI volumes in ``<subject_dir>/img/`` for the step's run
+      number (via ``rename_step_volumes`` convention: ``img-<run>-*.nii``).
 
     Safe to call when the files don't exist.  Only matches files for the
     specific ``(task, run)`` — other steps' data is left alone.
@@ -518,28 +696,86 @@ def clear_bids_run_files(
         return
 
     run_str = f"{step.run:02d}"
-    func_dir = session_dir / "func"
-    if func_dir.is_dir():
+    rest_dir = session_dir / "rest"
+    if rest_dir.is_dir():
         prefix = (
             f"{subject}_ses-{session_type}_task-{step.task}"
             f"_run-{run_str}_bold"
         )
-        for path in func_dir.iterdir():
+        for path in rest_dir.iterdir():
             if path.name.startswith(prefix):
                 try:
                     path.unlink()
                 except OSError:
                     logger.exception("failed to unlink %s", path)
 
-    # Raw MURFI volumes: series number = run (MURFI writes series 1-based).
-    img_dir = session_dir / "sourcedata" / "murfi" / "img"
+    # Raw MURFI volumes: post-rename_step_volumes filename encodes BOTH
+    # task + run, so this glob is task-specific. Only files for this
+    # step's (task, run) get deleted — Rest 1 (task=rest, run=1) is NOT
+    # affected when restarting Transfer Pre (task=transferpre, run=1).
+    # Regression: the old glob was ``img-{run:05d}-*.nii`` which matched
+    # Rest 1 when restarting any run=1 rt15 step; lost sub-morgan's Rest 1.
+    img_dir = session_dir.parent / "img"
     if img_dir.is_dir():
-        series = f"{step.run:05d}"
-        for path in img_dir.glob(f"img-{series}-*.nii"):
+        for path in img_dir.glob(step_volume_glob(step.task, step.run)):
             try:
                 path.unlink()
             except OSError:
                 logger.exception("failed to unlink %s", path)
+
+
+# ---------------------------------------------------------------------------
+# Provenance
+# ---------------------------------------------------------------------------
+
+
+def write_provenance(session_dir: Path, cli_argv: list[str] | None = None) -> Path:
+    """Write a ``provenance.json`` snapshot at session start.
+
+    Captures what-ran-when so RAs and future-us can answer "which code
+    produced this data?" Values captured:
+
+    * ``timestamp`` — ISO-8601 UTC
+    * ``git_sha`` / ``git_branch`` — best-effort (empty when not a repo)
+    * ``hostname`` / ``platform`` / ``python`` — execution environment
+    * ``cli_argv`` — how the pipeline was invoked
+
+    Idempotent: running twice overwrites with the latest snapshot. That's
+    the right behavior — if the pipeline is re-started for a session, the
+    latest provenance record is the interesting one.
+
+    Returns the path written.
+    """
+    out = session_dir / "provenance.json"
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    def _git(args: list[str]) -> str:
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=2.0,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return ""
+        if result.returncode != 0:
+            return ""
+        return result.stdout.strip()
+
+    payload = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "git_sha": _git(["rev-parse", "HEAD"]),
+        "git_branch": _git(["rev-parse", "--abbrev-ref", "HEAD"]),
+        "git_dirty": bool(_git(["status", "--porcelain"])),
+        "hostname": socket.gethostname(),
+        "platform": platform.platform(),
+        "python": sys.version.split()[0],
+        "cli_argv": cli_argv if cli_argv is not None else list(sys.argv),
+    }
+    _atomic_write_json(out, payload)
+    return out
 
 
 # Avoid unused-import warnings when StepKind is imported only for legacy tests.

@@ -388,7 +388,7 @@ async def test_interrupt_clears_partial_nii_files(
     fake = FakeStepExecutor(components=("murfi",))
     _install_fake(monkeypatch, nf_runner, fake)
 
-    func_dir = tmp_path / "func"
+    func_dir = tmp_path / "rest"
     func_dir.mkdir()
     run_file = func_dir / "sub-test_ses-rt15_task-feedback_run-01_bold.nii"
     run_file.write_bytes(b"partial")
@@ -664,7 +664,7 @@ async def test_resume_leaves_partial_data_on_disk(
     fake = FakeStepExecutor(components=("murfi",))
     _install_fake(monkeypatch, runner_a, fake)
 
-    func_dir = tmp_path / "func"
+    func_dir = tmp_path / "rest"
     func_dir.mkdir()
     partial = func_dir / "sub-test_ses-rt15_task-feedback_run-01_bold.nii"
     partial.write_bytes(b"partial")

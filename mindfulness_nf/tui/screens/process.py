@@ -185,13 +185,20 @@ class ProcessScreen(Screen[None]):
     async def _do_processing(self, selected_indices: tuple[int, ...]) -> None:
         """Run the ICA pipeline."""
         from mindfulness_nf.orchestration import ica
+        from mindfulness_nf.orchestration.layout import SubjectLayout
         from mindfulness_nf.orchestration.registration import register_masks
 
         app = self.app
         if not hasattr(app, "scanner_config"):
             return
 
-        subject_dir = app.subjects_dir / app.subject_id
+        # Legacy standalone process screen: assumes session_type="process".
+        # The main session_runner flow constructs layout from the session dir.
+        layout = SubjectLayout(
+            subjects_root=app.subjects_dir,
+            subject_id=app.subject_id,
+            session_type="process",
+        )
         log = self.query_one("#proc-log", LogPanel)
 
         def on_progress(msg: str) -> None:
@@ -201,14 +208,14 @@ class ProcessScreen(Screen[None]):
         try:
             # Step 1: Merge selected runs
             on_progress("Merging selected runs...")
-            runs = await ica.list_runs(subject_dir)
+            runs = await ica.list_runs(layout)
             run_indices = tuple(
                 int(runs[i - 1].run_name.split("-")[1])
                 for i in selected_indices
                 if i <= len(runs)
             )
             merged_path = await ica.merge_runs(
-                subject_dir, run_indices, tr=app.pipeline_config.tr,
+                layout, run_indices, tr=app.pipeline_config.tr,
             )
             on_progress(f"Merged to {merged_path.name}")
 
@@ -219,39 +226,35 @@ class ProcessScreen(Screen[None]):
                 / "fsl_scripts"
                 / "basic_ica_template.fsf"
             )
-            rest_dir = subject_dir / "rest"
-            subject_name = subject_dir.name
-            examplefunc = (
-                rest_dir
-                / f"{subject_name}_ses-localizer_task-rest_run-01_bold_mcflirt_median_bet.nii"
+            examplefunc = layout.rest_dir / layout.bold_bids_name(
+                task="rest", run=1, suffix="bold_mcflirt_median_bet.nii"
             )
 
             merged_paths = (merged_path,)
             if len(selected_indices) == 2 and len(runs) >= 2:
-                second_idx = int(runs[selected_indices[1] - 1].run_name.split("-")[1])
-                second_merged = rest_dir / f"{subject_name}_ses-localizer_task-rest_run-02_bold.nii"
+                second_merged = layout.bold_rest_intermediate(task="rest", run=2)
                 if second_merged.exists():
                     merged_paths = (merged_path, second_merged)
 
             ica_dir = await ica.run_ica(
-                subject_dir,
+                layout,
                 merged_paths,
                 examplefunc,
                 template_path=template_path,
                 on_progress=on_progress,
             )
 
-            # Step 3: Extract masks
-            template_dir_fsl = app.template_dir.parent.parent / "scripts" / "templates"
-            examplefunc_mask = (
-                rest_dir
-                / f"{subject_name}_ses-localizer_task-rest_run-01_bold_mcflirt_median_bet_mask.nii"
+            # Step 3: Extract masks — mask templates live under scripts/masks,
+            # not scripts/templates (matches feedback.sh:34 MASKS_DIR).
+            template_dir_fsl = app.template_dir.parent.parent / "scripts" / "masks"
+            examplefunc_mask = layout.rest_dir / layout.bold_bids_name(
+                task="rest", run=1, suffix="bold_mcflirt_median_bet_mask.nii"
             )
 
             dmn_mask, cen_mask = await ica.extract_masks(
                 ica_dir,
                 template_dir_fsl,
-                subject_dir=subject_dir,
+                layout=layout,
                 examplefunc=examplefunc,
                 examplefunc_mask=examplefunc_mask,
                 on_progress=on_progress,
@@ -259,7 +262,7 @@ class ProcessScreen(Screen[None]):
 
             # Step 4: Register masks
             dmn_reg, cen_reg = await register_masks(
-                subject_dir,
+                layout,
                 dmn_mask,
                 cen_mask,
                 on_progress=on_progress,

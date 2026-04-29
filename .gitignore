@@ -4,14 +4,11 @@ __pycache__/
 *.egg-info/
 .DS_Store
 
-# Subject runtime data (large NIfTI volumes from scans)
-murfi/subjects/sub-*/img/
-murfi/subjects/sub-*/rest/
-murfi/subjects/sub-*/xfm/
-murfi/subjects/sub-*/mask/*.nii
-murfi/subjects/sub-*/log/
-murfi/subjects/sub-*/fsfs/
-murfi/subjects/sub-*/qc/
+# Subject runtime data — every file under any sub-* dir.
+# Templates live at murfi/subjects/template/ (NOT under sub-*) and remain tracked.
+# Subject directories carry scanner data, behavioral CSVs, session state,
+# logs, masks, etc. — all generated artifacts, none belong in version control.
+murfi/subjects/sub-*/
 
 # DICOM input (received from scanner, transient)
 murfi/dicom_input/*.dcm
@@ -25,3 +22,5 @@ murfi/dry_run_cache/
 # Real-BOLD dry-run cache (downloaded from public datasets via
 # scripts/fetch_dry_run_bold.py — enables meaningful FSL rehearsal)
 murfi/dry_run_cache_bold/
+
+.claude/

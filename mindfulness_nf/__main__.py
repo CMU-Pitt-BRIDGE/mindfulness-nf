@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -38,6 +39,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "If omitted, synthetic volumes are fabricated on demand."
         ),
     )
+    parser.add_argument(
+        "--anchor",
+        dest="anchor",
+        default="",
+        help=(
+            "Mindfulness anchor phrase shown to the subject during NF runs. "
+            "Passed through to PsychoPy. Can also be set via the "
+            "MINDFULNESS_NF_ANCHOR environment variable."
+        ),
+    )
     # Back-compat: legacy --test flag used to gate the deleted TestScreen.
     parser.add_argument(
         "--test",
@@ -64,12 +75,24 @@ def main(argv: list[str] | None = None) -> int:
     # Defer import so --help does not require the full app tree.
     from mindfulness_nf.tui.app import MindfulnessApp
 
+    # Resolve to absolute so every Path derived downstream (session dirs,
+    # MURFI-native img/xfm/rest/mask/, FSL tool inputs, fsf DATA/REFERENCE
+    # substitutions) is absolute. FSL in particular runs FEAT from a
+    # working dir it cwd-chdirs into, and will then fail to resolve any
+    # relative input path — see e.g. "No image files match:
+    # murfi/subjects/.../bold" during fslmaths inside FEAT.
+    subjects_dir = Path(args.subjects_dir).resolve()
+
+    # Anchor precedence: --anchor CLI arg > $MINDFULNESS_NF_ANCHOR > empty.
+    anchor = args.anchor or os.environ.get("MINDFULNESS_NF_ANCHOR", "")
+
     app = MindfulnessApp(
         test_mode=args.test,
         dry_run=args.dry_run,
         subject_override=subject_override,
-        subjects_dir=Path(args.subjects_dir),
+        subjects_dir=subjects_dir,
         dry_run_cache_dir=cache,
+        anchor=anchor,
     )
     app.run()
     return 0

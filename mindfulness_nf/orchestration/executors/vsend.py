@@ -16,6 +16,10 @@ from mindfulness_nf.orchestration.executor import (
     StepProgress,
 )
 from mindfulness_nf.orchestration.scanner_source import ScannerSource
+from mindfulness_nf.orchestration.subjects import (
+    rename_step_volumes,
+    snapshot_img_dir,
+)
 
 __all__ = ["VsendStepExecutor"]
 
@@ -57,6 +61,11 @@ class VsendStepExecutor:
 
     async def run(self, on_progress: ProgressCallback) -> StepOutcome:
         self._run_task = asyncio.current_task()
+        # Snapshot img/ so we can rename only files produced by *this*
+        # MURFI invocation after it exits. MURFI reuses its per-process
+        # series counter across step runs, so without rename consecutive
+        # steps (e.g. Rest 1 → Rest 2) would overwrite each other.
+        self._img_snapshot = snapshot_img_dir(self._subject_dir.parent)
         try:
             await self._start_murfi()
         except Exception as exc:  # noqa: BLE001 — operational error to outcome
@@ -73,7 +82,7 @@ class VsendStepExecutor:
         )
 
         try:
-            return await self._monitor(on_progress)
+            outcome = await self._monitor(on_progress)
         except asyncio.CancelledError:
             await self._shutdown()
             return StepOutcome(
@@ -81,6 +90,37 @@ class VsendStepExecutor:
                 final_progress=self._snapshot(),
                 error="cancelled",
             )
+        if (
+            outcome.succeeded
+            and self._config.run is not None
+            and self._config.task is not None
+        ):
+            renamed = rename_step_volumes(
+                self._subject_dir.parent,
+                self._config.task,
+                self._config.run,
+                self._img_snapshot,
+            )
+            if renamed == 0 or renamed < self._target:
+                # Bug C guard: MURFI said the scan completed but saveImages
+                # produced no (or too few) on-disk volumes. This happened
+                # with sub-morgan's rt15 runs (2026-04-21) — lost all raw
+                # NIfTIs despite saveImages=true in XML, because rtdmn.xml
+                # was missing the separate <option name="save"> flag.
+                # Don't fail the step (volumes may have been processed in
+                # memory and the NF run still completed), but log prominently.
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "MURFI saved %d raw img files for step %s "
+                    "(task=%s run=%s, target=%d) — raw volumes may be "
+                    "incomplete. Check MURFI log + XML `save`/`saveImages`.",
+                    renamed,
+                    self._config.name,
+                    self._config.task,
+                    self._config.run,
+                    self._target,
+                )
+        return outcome
 
     async def stop(self, timeout: float = 5.0) -> None:
         self._stopped = True
@@ -90,15 +130,15 @@ class VsendStepExecutor:
         if component != "murfi":
             return
         async with self._relaunch_lock:
-            # Record log_baseline before tearing down so we don't double-count.
             if self._murfi is not None:
-                try:
-                    self._log_baseline = self._murfi.log_path.stat().st_size
-                except OSError:
-                    self._log_baseline = 0
                 await murfi_mod.stop(self._murfi)
                 self._murfi = None
             await self._start_murfi()
+            # ``murfi.start`` truncates the log; reset baseline so the
+            # monitor reads the fresh log from byte 0. Saving the old
+            # file size would starve the monitor until the new log grew
+            # past it.
+            self._log_baseline = 0
 
     def components(self) -> tuple[Component, ...]:
         return ("murfi",)
@@ -110,11 +150,19 @@ class VsendStepExecutor:
 
     async def _start_murfi(self) -> None:
         assert self._config.xml_name is not None  # validated in __init__
+        # Unique log per (task, run) so repeated vsend steps sharing the
+        # same XML don't clobber each other's logs.
+        xml_label = self._config.xml_name.removesuffix(".xml")
+        if self._config.task is not None and self._config.run is not None:
+            log_name = f"{xml_label}_{self._config.task}-{self._config.run:02d}"
+        else:
+            log_name = xml_label
         self._murfi = await murfi_mod.start(
             self._subject_dir,
             xml_name=self._config.xml_name,
             config=self._pipeline,
             scanner_config=self._scanner_config,
+            log_name=log_name,
         )
 
     async def _monitor(self, on_progress: ProgressCallback) -> StepOutcome:

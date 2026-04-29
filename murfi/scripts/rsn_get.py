@@ -9,12 +9,22 @@ import subprocess
 subjID = sys.argv[1]
 ica_version = sys.argv[2]
 
+# Optional third argument: the ICA output directory. The orchestrator passes
+# it post-layout-migration because ``rest/`` is now session-scoped — the old
+# hardcoded ``../subjects/{subjID}/rest/`` path is only valid for the legacy
+# subject-root layout. Fall back to legacy when invoked standalone.
+if len(sys.argv) >= 4:
+    base_ica_dir = sys.argv[3].rstrip('/')
+else:
+    base_ica_dir = f'../subjects/{subjID}/rest/rs_network.gica' if ica_version == 'multi_run' \
+        else f'../subjects/{subjID}/rest/rs_network.ica'
+
 if ica_version == 'multi_run':
-    ica_directory = f'../subjects/{subjID}/rest/rs_network.gica/groupmelodic.ica/'
+    ica_directory = f'{base_ica_dir}/groupmelodic.ica/'
     dmn_component = f'{ica_directory}/dmn_uthresh.nii'
     cen_component_base = f'{ica_directory}/cen_uthresh'
 elif ica_version == 'single_run':
-    ica_directory = f'../subjects/{subjID}/rest/rs_network.ica/'
+    ica_directory = f'{base_ica_dir}/'
     dmn_component = f'{ica_directory}/dmn_uthresh.nii'
     cen_component_base = f'{ica_directory}/cen_uthresh'
 

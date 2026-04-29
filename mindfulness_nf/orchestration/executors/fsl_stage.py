@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,8 @@ from mindfulness_nf.orchestration.executor import (
     StepOutcome,
     StepProgress,
 )
+from mindfulness_nf.orchestration.fsl_subprocess import run_interruptible
+from mindfulness_nf.orchestration.layout import SubjectLayout
 
 __all__ = ["FslStageExecutor"]
 
@@ -59,11 +62,22 @@ class FslStageExecutor:
             msg = f"FslStageExecutor requires StepConfig.fsl_command (step={config.name})"
             raise ValueError(msg)
         self._config = config
-        self._subject_dir = subject_dir
+        # The runner passes the BIDS session dir (``sub-X/ses-Y``). Every
+        # path this executor touches is exposed through SubjectLayout, which
+        # tracks both subject-scoped (img/, xfm/, mask/) and session-scoped
+        # (rest/, qc/) concerns. No more ``subject_dir.parent`` ladders.
+        self._layout = SubjectLayout.from_session_dir(subject_dir)
+        self._session_dir = subject_dir
+        self._subject_dir = subject_dir.parent  # legacy; retained for dry-run stubs
         self._pipeline = pipeline
         self._scanner_config = scanner_config
         self._dry_run = dry_run
         self._stopped = False
+        # Setting this event signals any in-flight subprocess started via
+        # :func:`run_interruptible` to SIGTERM → SIGKILL and surface a
+        # CancelledError. Set by :meth:`stop` to make operator ``i`` press
+        # actually interrupt mid-stage.
+        self._stop_event = asyncio.Event()
 
     # ---- public protocol -------------------------------------------------
 
@@ -113,10 +127,12 @@ class FslStageExecutor:
             return self._cancelled_outcome()
 
     async def stop(self, timeout: float = 5.0) -> None:
-        # FSL helpers run under asyncio.to_thread and cannot be interrupted mid-call.
-        # We mark stopped so that the next boundary observes it; the outer
-        # task.cancel() plus our cancelled handler covers the rest.
+        # Signal any in-flight ``run_interruptible`` subprocess to terminate
+        # (SIGTERM → short grace → SIGKILL to the process group). The
+        # ``_stopped`` flag still gates boundary checks for helpers that
+        # haven't been migrated to the interruptible path yet.
         self._stopped = True
+        self._stop_event.set()
 
     async def relaunch(self, component: Component) -> None:
         return None
@@ -130,51 +146,110 @@ class FslStageExecutor:
     # ---- per-command implementations -------------------------------------
 
     async def _run_fslmerge(self, on_progress: ProgressCallback) -> StepOutcome:
-        on_progress(self._pct(10, "discovering runs"))
-        runs = await ica_mod.list_runs(self._subject_dir)
+        on_progress(self._pct(5, "discovering runs"))
+        runs = await ica_mod.list_runs(self._layout)
         if not runs:
             return StepOutcome(
                 succeeded=False,
-                final_progress=self._pct(10, "no runs found"),
+                final_progress=self._pct(5, "no runs found"),
                 error="fslmerge: no runs in subject img/ dir",
             )
-        # If the caller has recorded selected_runs elsewhere, FslStageExecutor
-        # here simply merges everything found; SessionRunner is responsible for
-        # threading artifacts ("selected_runs") in a future todo.
+        # SessionRunner may later thread "selected_runs" via artifacts; for
+        # now merge everything found.
         run_indices = tuple(int(r.run_name.split("-")[1]) for r in runs)
-        on_progress(self._pct(50, f"merging {len(run_indices)} run(s)"))
+        on_progress(self._pct(20, f"merging {len(run_indices)} run(s)"))
         merged = await ica_mod.merge_runs(
-            self._subject_dir, run_indices, tr=self._pipeline.tr
+            self._layout, run_indices, tr=self._pipeline.tr
         )
         if not merged.exists():
             return StepOutcome(
                 succeeded=False,
-                final_progress=self._pct(90, "merge produced no output"),
+                final_progress=self._pct(30, "merge produced no output"),
                 error=f"fslmerge: expected {merged} to exist",
             )
-        on_progress(self._pct(100, f"merged -> {merged.name}"))
+        # Preprocess: mcflirt → Tmedian → bet. The MELODIC stage uses the
+        # skull-stripped median as its regstandard/reference. Mirrors the
+        # shell pipeline (feedback.sh:233-268).
+        on_progress(self._pct(50, "mcflirt motion correction"))
+        try:
+            await self._preprocess_reference(merged)
+        except subprocess.CalledProcessError as exc:
+            return StepOutcome(
+                succeeded=False,
+                final_progress=self._pct(70, "preprocess failed"),
+                error=f"preprocess: {exc.cmd[0]} failed (rc={exc.returncode})",
+            )
+        on_progress(self._pct(100, f"merged + preprocessed -> {merged.name}"))
         return StepOutcome(
             succeeded=True,
             final_progress=self._pct(100, "merge complete"),
             artifacts={"merged_path": str(merged)},
         )
 
+    async def _preprocess_reference(self, merged: Path) -> None:
+        """Run ``mcflirt`` → ``fslmaths -Tmedian`` → ``bet`` on the merged
+        bold. Interruptible — operator ``i`` presses kill the in-flight FSL
+        subprocess and surface a ``CancelledError``.
+        """
+        stem = merged.with_suffix("")
+        mcflirt = Path(f"{stem}_mcflirt.nii")
+        median = Path(f"{stem}_mcflirt_median.nii")
+        bet = Path(f"{stem}_mcflirt_median_bet.nii")
+
+        await run_interruptible(
+            ["mcflirt", "-in", str(merged), "-out", str(mcflirt)],
+            stop_event=self._stop_event,
+        )
+        await run_interruptible(
+            ["fslmaths", str(mcflirt), "-Tmedian", str(median)],
+            stop_event=self._stop_event,
+        )
+        await run_interruptible(
+            ["bet", str(median), str(bet), "-R", "-f", "0.4", "-g", "0", "-m"],
+            stop_event=self._stop_event,
+        )
+
     async def _run_melodic(self, on_progress: ProgressCallback) -> StepOutcome:
-        rest_dir = self._subject_dir / "rest"
-        merged = sorted(rest_dir.glob("*_task-rest_run-*_bold.nii"))
+        rest_dir = self._layout.rest_dir
+        # Only match the raw merged BOLDs, NOT the mcflirt/median/bet
+        # intermediates the preprocess step produced alongside them.
+        merged = sorted(
+            p for p in rest_dir.glob("*_task-rest_run-*_bold.nii")
+            if "_mcflirt" not in p.name
+        )
         if not merged:
             return StepOutcome(
                 succeeded=False,
                 final_progress=self._pct(0, "no merged inputs"),
                 error="melodic: no merged bold files in rest/",
             )
-        reference = self._subject_dir / "xfm" / "examplefunc_brain.nii"
-        template = Path(__file__).resolve().parents[3] / "murfi" / "templates" / "ica.fsf"
+        # Reference = skull-stripped median from preprocessing. Matches shell
+        # feedback.sh:287 `reference_vol_for_ica=...run-01_bold_mcflirt_median_bet.nii`.
+        first_stem = merged[0].with_suffix("")
+        reference = Path(f"{first_stem}_mcflirt_median_bet.nii")
+        if not reference.exists():
+            return StepOutcome(
+                succeeded=False,
+                final_progress=self._pct(5, "reference missing"),
+                error=f"melodic: expected reference {reference} (preprocess failed?)",
+            )
+        # FEAT/MELODIC template lives in murfi/scripts/fsl_scripts/. Pick the
+        # single-run template when only one bold was merged; multi-run
+        # template handles two BOLD inputs per the REMIND/rtNF protocol.
+        fsl_scripts_dir = (
+            Path(__file__).resolve().parents[3]
+            / "murfi" / "scripts" / "fsl_scripts"
+        )
+        template_name = (
+            "basic_ica_template.fsf" if len(merged) >= 2
+            else "basic_ica_template_single_run.fsf"
+        )
+        template = fsl_scripts_dir / template_name
 
         on_progress(self._pct(20, "starting FEAT/MELODIC"))
         try:
             ica_dir = await ica_mod.run_ica(
-                self._subject_dir,
+                self._layout,
                 tuple(merged),
                 reference_vol=reference,
                 template_path=template,
@@ -203,8 +278,8 @@ class FslStageExecutor:
     async def _run_extract(
         self, on_progress: ProgressCallback, *, which: str
     ) -> StepOutcome:
-        mask_dir = self._subject_dir / "mask"
-        rest_dir = self._subject_dir / "rest"
+        mask_dir = self._layout.mask_dir
+        rest_dir = self._layout.rest_dir
         ica_dir = rest_dir / "rs_network.gica"
         if not ica_dir.is_dir():
             ica_dir = rest_dir / "rs_network.ica"
@@ -215,16 +290,45 @@ class FslStageExecutor:
                 error="extract: ICA output directory missing",
             )
 
-        template_dir = Path(__file__).resolve().parents[3] / "murfi" / "templates"
-        examplefunc = self._subject_dir / "xfm" / "examplefunc_brain.nii"
-        examplefunc_mask = self._subject_dir / "xfm" / "examplefunc_brain_mask.nii"
+        # Mask templates (DMNax_*, CENa_*, FSL_7networks*) live under
+        # ``murfi/scripts/masks/`` per the shell pipeline (feedback.sh:34).
+        template_dir = (
+            Path(__file__).resolve().parents[3] / "murfi" / "scripts" / "masks"
+        )
+        # examplefunc = skull-stripped median produced by _preprocess_reference.
+        # examplefunc_mask = the brain mask that ``bet -m`` produced alongside it.
+        # Legacy code looked for ``xfm/examplefunc_brain*.nii`` — no pipeline
+        # step ever writes there.
+        merged = sorted(
+            p for p in rest_dir.glob("*_task-rest_run-*_bold.nii")
+            if "_mcflirt" not in p.name
+        )
+        if not merged:
+            return StepOutcome(
+                succeeded=False,
+                final_progress=self._pct(5, "no merged bold to resolve reference"),
+                error="extract: merged bold missing; preprocess step may have been skipped",
+            )
+        first_stem = merged[0].with_suffix("")
+        examplefunc = Path(f"{first_stem}_mcflirt_median_bet.nii")
+        examplefunc_mask = Path(f"{first_stem}_mcflirt_median_bet_mask.nii")
+        for required in (examplefunc, examplefunc_mask):
+            if not required.exists():
+                return StepOutcome(
+                    succeeded=False,
+                    final_progress=self._pct(10, "examplefunc missing"),
+                    error=(
+                        f"extract: expected {required} (preprocess may not have "
+                        "produced the BET brain/mask pair)"
+                    ),
+                )
 
         on_progress(self._pct(20, "extracting masks"))
         try:
             dmn, cen = await ica_mod.extract_masks(
                 ica_dir,
                 template_dir,
-                subject_dir=self._subject_dir,
+                layout=self._layout,
                 examplefunc=examplefunc,
                 examplefunc_mask=examplefunc_mask,
                 on_progress=lambda msg: on_progress(self._pct(60, msg)),
@@ -251,7 +355,7 @@ class FslStageExecutor:
         )
 
     async def _run_register(self, on_progress: ProgressCallback) -> StepOutcome:
-        mask_dir = self._subject_dir / "mask"
+        mask_dir = self._layout.mask_dir
         dmn_src = mask_dir / "dmn_rest_original.nii"
         cen_src = mask_dir / "cen_rest_original.nii"
         if not dmn_src.exists() or not cen_src.exists():
@@ -263,10 +367,11 @@ class FslStageExecutor:
         on_progress(self._pct(20, "registering masks to study_ref"))
         try:
             dmn_reg, cen_reg = await reg_mod.register_masks(
-                self._subject_dir,
+                self._layout,
                 dmn_src,
                 cen_src,
                 on_progress=lambda msg: on_progress(self._pct(60, msg)),
+                stop_event=self._stop_event,
             )
         except FileNotFoundError as exc:
             return StepOutcome(
@@ -290,7 +395,7 @@ class FslStageExecutor:
     async def _run_qc(self, on_progress: ProgressCallback) -> StepOutcome:
         # Placeholder QC: verify the final masks exist under mask/.
         # A richer visualisation step can replace this without touching the runner.
-        mask_dir = self._subject_dir / "mask"
+        mask_dir = self._layout.mask_dir
         expected = (mask_dir / "dmn.nii", mask_dir / "cen.nii")
         on_progress(self._pct(50, "checking mask outputs"))
         missing = [str(p) for p in expected if not p.exists()]
@@ -311,7 +416,7 @@ class FslStageExecutor:
         # Interactive run selection is driven by the TUI; here we emit a stub
         # artifact listing every run found on disk so downstream stages have
         # something to consume. Tests substitute a fake executor.
-        runs = await ica_mod.list_runs(self._subject_dir)
+        runs = await ica_mod.list_runs(self._layout)
         run_names = tuple(r.run_name for r in runs)
         on_progress(self._pct(100, f"selected {len(run_names)} run(s)"))
         return StepOutcome(
@@ -336,8 +441,8 @@ class FslStageExecutor:
         await asyncio.sleep(0.05)
 
         artifacts: dict[str, Any] = {"dry_run": True}
-        mask_dir = self._subject_dir / "mask"
-        rest_dir = self._subject_dir / "rest"
+        mask_dir = self._layout.mask_dir
+        rest_dir = self._layout.rest_dir
 
         match cmd:
             case "fslmerge":

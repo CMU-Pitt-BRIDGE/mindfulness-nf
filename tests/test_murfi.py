@@ -57,11 +57,11 @@ class TestStart:
 
     @pytest.mark.asyncio
     async def test_start_returns_murfi_process(self, tmp_path: Path) -> None:
-        subject_dir = tmp_path / "subjects" / "sub-001"
-        subject_dir.mkdir(parents=True)
-        xml_dir = subject_dir / "xml"
-        xml_dir.mkdir()
-        (xml_dir / "rtdmn.xml").write_text("<scanner/>")
+        # ``start`` receives a BIDS *session* dir: subjects/sub-XXX/ses-YYY
+        session_dir = tmp_path / "subjects" / "sub-001" / "ses-loc3"
+        session_dir.mkdir(parents=True)
+        (session_dir / "xml").mkdir()
+        (session_dir / "xml" / "rtdmn.xml").write_text("<scanner/>")
 
         fake_proc = AsyncMock(spec=asyncio.subprocess.Process)
         fake_proc.returncode = None
@@ -72,7 +72,7 @@ class TestStart:
             return_value=fake_proc,
         ) as mock_exec:
             result = await start(
-                subject_dir, "rtdmn.xml", PipelineConfig()
+                session_dir, "rtdmn.xml", PipelineConfig()
             )
 
         assert isinstance(result, MurfiProcess)
@@ -86,10 +86,10 @@ class TestStart:
 
     @pytest.mark.asyncio
     async def test_start_passes_bind_mounts(self, tmp_path: Path) -> None:
-        subject_dir = tmp_path / "subjects" / "sub-002"
-        subject_dir.mkdir(parents=True)
-        (subject_dir / "xml").mkdir()
-        (subject_dir / "xml" / "2vol.xml").write_text("<scanner/>")
+        session_dir = tmp_path / "subjects" / "sub-002" / "ses-loc3"
+        session_dir.mkdir(parents=True)
+        (session_dir / "xml").mkdir()
+        (session_dir / "xml" / "2vol.xml").write_text("<scanner/>")
 
         fake_proc = AsyncMock(spec=asyncio.subprocess.Process)
         fake_proc.returncode = None
@@ -99,21 +99,85 @@ class TestStart:
             "mindfulness_nf.orchestration.murfi.asyncio.create_subprocess_exec",
             return_value=fake_proc,
         ) as mock_exec:
-            await start(subject_dir, "2vol.xml", PipelineConfig())
+            await start(session_dir, "2vol.xml", PipelineConfig())
 
         cmd = mock_exec.call_args.args
-        # Find --bind argument
         bind_idx = list(cmd).index("--bind")
         bind_val = cmd[bind_idx + 1]
-        subjects_dir = str(subject_dir.parent)
-        assert bind_val == f"{subjects_dir}:{subjects_dir}"
+        # Bind should be the *subjects* root (two levels above the session),
+        # both halves identical, and always absolute.
+        subjects_root = str((tmp_path / "subjects").resolve())
+        assert bind_val == f"{subjects_root}:{subjects_root}"
+        assert bind_val.startswith("/"), "apptainer rejects relative --bind destinations"
+
+    @pytest.mark.asyncio
+    async def test_start_resolves_relative_subject_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Regression for MURFI exit 255 / apptainer 'destination must be absolute'.
+
+        Running the CLI with the default ``--subjects-dir murfi/subjects`` (relative)
+        used to propagate a relative path all the way into the apptainer bind,
+        which apptainer rejects.  ``start`` must resolve to absolute.
+        """
+        subjects = tmp_path / "subjects"
+        (subjects / "sub-004" / "ses-loc3" / "xml").mkdir(parents=True)
+        (subjects / "sub-004" / "ses-loc3" / "xml" / "rest.xml").write_text("<scanner/>")
+
+        monkeypatch.chdir(tmp_path)
+        relative_session_dir = Path("subjects/sub-004/ses-loc3")
+        assert not relative_session_dir.is_absolute()
+
+        fake_proc = AsyncMock(spec=asyncio.subprocess.Process)
+        fake_proc.returncode = None
+        fake_proc.pid = 100
+
+        with patch(
+            "mindfulness_nf.orchestration.murfi.asyncio.create_subprocess_exec",
+            return_value=fake_proc,
+        ) as mock_exec:
+            await start(relative_session_dir, "rest.xml", PipelineConfig())
+
+        cmd = list(mock_exec.call_args.args)
+        bind_val = cmd[cmd.index("--bind") + 1]
+        src, dst = bind_val.split(":", 1)
+        assert src.startswith("/") and dst.startswith("/")
+        assert src == dst
+
+    @pytest.mark.asyncio
+    async def test_start_loads_xml_from_bids_sourcedata(self, tmp_path: Path) -> None:
+        """RED/regression: MURFI's ``-f`` must point at the BIDS location
+        ``<session_dir>/sourcedata/murfi/xml/<xml_name>``, which is where
+        ``create_subject_session_dir`` writes the XML templates.
+
+        Previous code pointed at ``<session_dir>/xml/`` which doesn't exist
+        in the BIDS layout, producing ``failed to parse config file`` at
+        MURFI startup and a step that runs forever without progress.
+        """
+        session_dir = tmp_path / "subjects" / "sub-005" / "ses-loc3"
+        (session_dir / "sourcedata" / "murfi" / "xml").mkdir(parents=True)
+        xml_file = session_dir / "sourcedata" / "murfi" / "xml" / "rest.xml"
+        xml_file.write_text("<scanner/>")
+
+        fake_proc = AsyncMock(spec=asyncio.subprocess.Process)
+        fake_proc.returncode = None
+        fake_proc.pid = 102
+
+        with patch(
+            "mindfulness_nf.orchestration.murfi.asyncio.create_subprocess_exec",
+            return_value=fake_proc,
+        ) as mock_exec:
+            await start(session_dir, "rest.xml", PipelineConfig())
+
+        cmd = list(mock_exec.call_args.args)
+        f_idx = cmd.index("-f")
+        xml_arg = cmd[f_idx + 1]
+        assert xml_arg == str(xml_file.resolve())
 
     @pytest.mark.asyncio
     async def test_start_sets_env_vars(self, tmp_path: Path) -> None:
-        subject_dir = tmp_path / "subjects" / "sub-003"
-        subject_dir.mkdir(parents=True)
-        (subject_dir / "xml").mkdir()
-        (subject_dir / "xml" / "rtdmn.xml").write_text("<scanner/>")
+        session_dir = tmp_path / "subjects" / "sub-003" / "ses-loc3"
+        session_dir.mkdir(parents=True)
+        (session_dir / "xml").mkdir()
+        (session_dir / "xml" / "rtdmn.xml").write_text("<scanner/>")
 
         fake_proc = AsyncMock(spec=asyncio.subprocess.Process)
         fake_proc.returncode = None
@@ -123,14 +187,17 @@ class TestStart:
             "mindfulness_nf.orchestration.murfi.asyncio.create_subprocess_exec",
             return_value=fake_proc,
         ) as mock_exec:
-            await start(subject_dir, "rtdmn.xml", PipelineConfig())
+            await start(session_dir, "rtdmn.xml", PipelineConfig())
 
         cmd = list(mock_exec.call_args.args)
-        # Check MURFI_SUBJECT_NAME env
         env_args = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--env"]
+        # The subject *name* comes from sub-XXX, never ses-YYY.
         subject_name_envs = [e for e in env_args if e.startswith("MURFI_SUBJECT_NAME=")]
-        assert len(subject_name_envs) == 1
-        assert subject_name_envs[0] == "MURFI_SUBJECT_NAME=sub-003"
+        assert subject_name_envs == ["MURFI_SUBJECT_NAME=sub-003"]
+        # MURFI_SUBJECTS_DIR is the subjects root (two levels up), absolute.
+        subjects_dir_envs = [e for e in env_args if e.startswith("MURFI_SUBJECTS_DIR=")]
+        subjects_root = str((tmp_path / "subjects").resolve())
+        assert subjects_dir_envs == [f"MURFI_SUBJECTS_DIR={subjects_root}/"]
 
 
 # ---------------------------------------------------------------------------

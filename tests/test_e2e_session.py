@@ -588,7 +588,7 @@ class TestKeybindings:
         fake = FakeStepExecutor(components=("murfi",))
         _install_fake(monkeypatch, runner, fake)
 
-        func_dir = tmp_path / "func"
+        func_dir = tmp_path / "rest"
         func_dir.mkdir()
         this_run = func_dir / "sub-test_ses-rt15_task-feedback_run-01_bold.nii"
         this_run.write_bytes(b"partial")
@@ -708,7 +708,7 @@ class TestKeybindings:
         fake = FakeStepExecutor(components=("murfi", "psychopy"))
         _install_fake(monkeypatch, runner, fake)
 
-        func_dir = tmp_path / "func"
+        func_dir = tmp_path / "rest"
         func_dir.mkdir()
         partial = func_dir / "sub-test_ses-rt15_task-feedback_run-01_bold.nii"
         partial.write_bytes(b"partial")
@@ -750,7 +750,7 @@ class TestKeybindings:
         first = FakeStepExecutor(components=("murfi", "psychopy"))
         _install_fake(monkeypatch, runner, first)
 
-        func_dir = tmp_path / "func"
+        func_dir = tmp_path / "rest"
         func_dir.mkdir()
         partial = func_dir / "sub-test_ses-rt15_task-feedback_run-01_bold.nii"
         partial.write_bytes(b"partial")
@@ -979,7 +979,7 @@ class TestStateInvariants:
             running_idx = runner.state.running_index
 
             # Seed a sentinel file for the already-completed step 0.
-            func_dir = tmp_path / "func"
+            func_dir = tmp_path / "rest"
             func_dir.mkdir(exist_ok=True)
             sentinel = (
                 func_dir / "sub-test_ses-rt15_task-2vol_run-01_bold.nii"
@@ -1499,62 +1499,71 @@ class TestConfigsAndBids:
         assert "cen_mask" in process_tasks
 
     @pytest.mark.asyncio
-    async def test_scanner_simulator_pushes_vsend_and_dicom(
+    @pytest.mark.asyncio
+    async def test_scanner_simulator_pushes_vsend_via_python_sender(
         self,
         tmp_path: Path,
         mocker: Any,
     ) -> None:
-        """SimulatedScannerSource shells out to vSend / dcmsend with cached files."""
-        # Seed a cache with 2 NIfTI and 3 DICOM placeholders.
+        """push_vsend streams volumes via the in-process Python sender."""
         cache = tmp_path / "cache"
         (cache / "nifti").mkdir(parents=True)
-        (cache / "dicom").mkdir(parents=True)
         (cache / "nifti" / "vol-001.nii").write_bytes(b"\x00")
         (cache / "nifti" / "vol-002.nii").write_bytes(b"\x00")
-        for i in range(3):
-            (cache / "dicom" / f"slice-{i:03d}.dcm").write_bytes(b"\x00")
 
-        # Mock shutil.which so the simulator finds the binaries on any host.
+        sent: list[Path] = []
+
+        def _fake_sender(host, port, nifti_paths, tr_seconds):
+            sent.extend(nifti_paths)
+
         mocker.patch(
-            "mindfulness_nf.orchestration.scanner_source.shutil.which",
-            return_value="/usr/bin/true",
+            "mindfulness_nf.orchestration.scanner_source._send_nifti_via_vsend",
+            side_effect=_fake_sender,
         )
 
-        # Mock the subprocess launcher to record invocations without exec-ing.
-        class _FakeProc:
-            returncode: int | None = 0
-
-            async def wait(self) -> int:
-                return 0
-
-            def terminate(self) -> None:
-                return None
-
-        async def _fake_exec(*cmd: str, **_kw: Any) -> _FakeProc:
-            _fake_exec.calls.append(cmd)  # type: ignore[attr-defined]
-            return _FakeProc()
-
-        _fake_exec.calls = []  # type: ignore[attr-defined]
-        mocker.patch(
-            "mindfulness_nf.orchestration.scanner_source.asyncio.create_subprocess_exec",
-            side_effect=_fake_exec,
-        )
-
-        source = SimulatedScannerSource(cache_dir=cache, tr_seconds=0.1)
-
-        step = RT15[1]  # 2-volume (VSEND_SCAN)
+        source = SimulatedScannerSource(cache_dir=cache, tr_seconds=0.01)
+        step = RT15[1]
         xml = tmp_path / "2vol.xml"
         xml.write_text("<xml/>")
 
         await source.push_vsend(xml_path=xml, subject_dir=tmp_path, step=step)
+
+        assert len(sent) == 2
+
+    @pytest.mark.asyncio
+    async def test_scanner_simulator_pushes_dicom_via_pynetdicom(
+        self,
+        tmp_path: Path,
+        mocker: Any,
+    ) -> None:
+        """push_dicom uses an in-process C-STORE SCU, not an external binary."""
+        cache = tmp_path / "cache"
+
+        sent: list[Path] = []
+
+        def _fake_send(
+            target_host: str,
+            target_port: int,
+            ae_title: str,
+            dicom_files: tuple[Path, ...],
+            tr_seconds: float,
+        ) -> None:
+            sent.extend(dicom_files)
+
+        mocker.patch(
+            "mindfulness_nf.orchestration.scanner_source._send_dicoms_via_pynetdicom",
+            side_effect=_fake_send,
+        )
+
+        source = SimulatedScannerSource(cache_dir=cache, tr_seconds=0.01)
+        step = RT15[1]  # progress_target=2
+
         await source.push_dicom(
             target_host="localhost", target_port=4006, ae_title="MURFI", step=step
         )
 
-        calls = _fake_exec.calls  # type: ignore[attr-defined]
-        assert len(calls) == 2
-        assert any("vSend" in arg or arg.endswith("true") for arg in calls[0])
-        # Second call is dcmsend.
-        assert "localhost" in calls[1] or any(
-            "4006" == a for a in calls[1]
-        )
+        # Empty cache → synthesis path runs → 2 DICOMs generated and sent.
+        assert len(sent) == 2
+        for p in sent:
+            assert p.suffix == ".dcm"
+            assert p.exists()

@@ -125,5 +125,6 @@ class SessionSelectScreen(Screen[str]):
             scanner_config=app.scanner_config,
             scanner_source=app.scanner_source,
             dry_run=getattr(app, "dry_run", False),
+            anchor=getattr(app, "anchor", ""),
         )
         app.push_screen(SessionScreen(runner))

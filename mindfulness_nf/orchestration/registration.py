@@ -1,7 +1,7 @@
 """Mask registration to 2-volume reference space.
 
 Imperative shell: I/O is expected here. All blocking FSL subprocess calls
-run in threads via ``asyncio.to_thread``.
+run in threads via :func:`run_interruptible` for operator-cancellable behavior.
 """
 
 from __future__ import annotations
@@ -11,13 +11,17 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
+from mindfulness_nf.orchestration.fsl_subprocess import run_interruptible
+from mindfulness_nf.orchestration.layout import SubjectLayout
+
 
 async def register_masks(
-    subject_dir: Path,
+    layout: SubjectLayout,
     dmn_mask: Path,
     cen_mask: Path,
     *,
     on_progress: Callable[[str], None] | None = None,
+    stop_event: asyncio.Event | None = None,
 ) -> tuple[Path, Path]:
     """Register DMN and CEN masks from resting-state space to study_ref space.
 
@@ -35,8 +39,10 @@ async def register_masks(
 
     Parameters
     ----------
-    subject_dir:
-        Subject directory (e.g. ``subjects/sub-001``).
+    layout:
+        :class:`SubjectLayout` for the session. ``xfm_dir`` and
+        ``mask_dir`` are subject-scoped; ``qc_dir`` is session-scoped
+        (QC overlays belong to the session that produced them).
     dmn_mask:
         Path to the DMN mask in resting-state native space
         (``dmn_rest_original.nii``).
@@ -57,16 +63,13 @@ async def register_masks(
         if on_progress is not None:
             on_progress(msg)
 
-    xfm_dir = subject_dir / "xfm"
-    mask_dir = subject_dir / "mask"
-    qc_dir = subject_dir / "qc"
+    xfm_dir = layout.xfm_dir
+    mask_dir = layout.mask_dir
+    qc_dir = layout.qc_dir
     mask_dir.mkdir(parents=True, exist_ok=True)
     qc_dir.mkdir(parents=True, exist_ok=True)
 
-    subject_name = subject_dir.name
-    ses = "ses-localizer"
-
-    # Find latest series reference.
+    # Find latest series reference (``series*_ref.nii`` in xfm/).
     _report("Finding latest series reference")
     ref_files = sorted(
         p
@@ -98,31 +101,28 @@ async def register_masks(
     # Skull-strip reference.
     _report("Skull-stripping reference volume")
     brain_path = Path(f"{latest_ref_stem}_brain")
-    await asyncio.to_thread(
-        subprocess.run,
+    await run_interruptible(
         [
             "bet",
             str(latest_ref_stem),
             str(brain_path),
             "-R", "-f", "0.4", "-g", "0", "-m",
         ],
-        check=True,
-        capture_output=True,
-        text=True,
+        stop_event=stop_event,
     )
 
-    # QC image.
+    # QC image (non-critical: ignore failures so missing `slices` / bad
+    # GIF generation doesn't fail the whole registration).
     brain_mask_path = Path(f"{latest_ref_stem}_brain_mask")
-    await asyncio.to_thread(
-        subprocess.run,
+    await run_interruptible(
         [
             "slices",
             str(latest_ref),
             f"{brain_mask_path}.nii",
             "-o", str(qc_dir / "2vol_skullstrip_brain_mask_check.gif"),
         ],
-        capture_output=True,
-        text=True,
+        stop_event=stop_event,
+        check=False,
     )
 
     # Compute rest-to-study_ref transform.
@@ -130,15 +130,12 @@ async def register_masks(
     epi2reg_dir = xfm_dir / "epi2reg"
     epi2reg_dir.mkdir(parents=True, exist_ok=True)
 
-    examplefunc = (
-        subject_dir
-        / "rest"
-        / f"{subject_name}_{ses}_task-rest_run-01_bold_mcflirt_median_bet.nii"
+    examplefunc = layout.rest_dir / layout.bold_bids_name(
+        task="rest", run=1, suffix="bold_mcflirt_median_bet.nii"
     )
     rest2ref_mat = epi2reg_dir / "rest2studyref.mat"
 
-    await asyncio.to_thread(
-        subprocess.run,
+    await run_interruptible(
         [
             "flirt",
             "-in", str(examplefunc),
@@ -146,22 +143,18 @@ async def register_masks(
             "-out", str(epi2reg_dir / "rest2studyref_brain"),
             "-omat", str(rest2ref_mat),
         ],
-        check=True,
-        capture_output=True,
-        text=True,
+        stop_event=stop_event,
     )
 
-    # QC image for registration.
-    await asyncio.to_thread(
-        subprocess.run,
+    await run_interruptible(
         [
             "slices",
             str(epi2reg_dir / "rest2studyref_brain"),
             str(brain_path),
             "-o", str(qc_dir / "rest_warp_to_2vol_native_check.gif"),
         ],
-        capture_output=True,
-        text=True,
+        stop_event=stop_event,
+        check=False,
     )
 
     # Register each mask.
@@ -172,8 +165,7 @@ async def register_masks(
         temp_out = mask_dir / f"{mask_name}_temp"
 
         # Apply transform with nearest-neighbour interpolation.
-        await asyncio.to_thread(
-            subprocess.run,
+        await run_interruptible(
             [
                 "flirt",
                 "-in", str(mask_path),
@@ -184,64 +176,43 @@ async def register_masks(
                 "-interp", "nearestneighbour",
                 "-datatype", "short",
             ],
-            check=True,
-            capture_output=True,
-            text=True,
+            stop_event=stop_event,
         )
 
         # Erode brain mask (4x) to keep voxels inside brain.
         ero4_path = Path(f"{latest_ref_stem}_brain_mask_ero4")
-        await asyncio.to_thread(
-            subprocess.run,
+        await run_interruptible(
             [
                 "fslmaths",
                 f"{brain_mask_path}",
                 "-ero", "-ero", "-ero", "-ero",
                 str(ero4_path),
             ],
-            check=True,
-            capture_output=True,
-            text=True,
+            stop_event=stop_event,
         )
 
-        # Multiply by eroded mask.
+        # Multiply by eroded mask. The pipeline runs with
+        # FSLOUTPUTTYPE=NIFTI (ica.py sets this at module load), so FSL
+        # writes ``.nii`` not ``.nii.gz``.
         studyref_out = mask_dir / f"{mask_name}_studyref"
-        await asyncio.to_thread(
-            subprocess.run,
+        await run_interruptible(
             [
                 "fslmaths",
-                f"{temp_out}.nii.gz",
+                f"{temp_out}.nii",
                 "-mul", str(ero4_path),
-                f"{studyref_out}.nii.gz",
+                f"{studyref_out}.nii",
                 "-odt", "short",
             ],
-            check=True,
-            capture_output=True,
-            text=True,
+            stop_event=stop_event,
         )
-
-        # Uncompress.
-        gz_path = Path(f"{studyref_out}.nii.gz")
-        if gz_path.exists():
-            await asyncio.to_thread(
-                subprocess.run,
-                ["gunzip", "-f", str(gz_path)],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
 
         # Final brain mask cleanup.
         brain_bin = Path(f"{latest_ref_stem}_brain_bin")
-        await asyncio.to_thread(
-            subprocess.run,
+        await run_interruptible(
             ["fslmaths", str(brain_path), "-bin", str(brain_bin)],
-            check=True,
-            capture_output=True,
-            text=True,
+            stop_event=stop_event,
         )
-        await asyncio.to_thread(
-            subprocess.run,
+        await run_interruptible(
             [
                 "fslmaths",
                 f"{studyref_out}.nii",
@@ -249,9 +220,7 @@ async def register_masks(
                 f"{studyref_out}.nii",
                 "-odt", "short",
             ],
-            check=True,
-            capture_output=True,
-            text=True,
+            stop_event=stop_event,
         )
 
         # Copy to final MURFI mask.
@@ -262,11 +231,16 @@ async def register_masks(
         await asyncio.to_thread(final_mask.write_bytes, src_bytes)
         registered.append(final_mask)
 
-        # Clean up temp files.
+        # Clean up temp files. Loop both extensions defensively — FSL may
+        # produce either depending on build/env, and these unlinks are
+        # .exists()-gated so extras are harmless.
         for suffix in (".nii", ".nii.gz"):
             temp = Path(f"{temp_out}{suffix}")
             if temp.exists():
                 temp.unlink()
+        studyref_gz = Path(f"{studyref_out}.nii.gz")
+        if studyref_gz.exists():
+            studyref_gz.unlink()
 
     # Clean up erosion and bin files.
     for pattern in ("_brain_mask_ero4", "_brain_bin"):

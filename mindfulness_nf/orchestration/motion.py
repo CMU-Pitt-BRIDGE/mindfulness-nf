@@ -21,14 +21,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
+import os
 import shutil
-import subprocess
 from pathlib import Path
 
 from mindfulness_nf.orchestration.subjects import step_volume_glob
 
 logger = logging.getLogger(__name__)
+
+
+# Force FSL to emit uncompressed NIfTI inside this module's subprocesses.
+# The shell env on scanner PCs is typically ``FSLOUTPUTTYPE=NIFTI_GZ``,
+# which would make mcflirt write ``_mcf.nii.gz`` instead of ``_mcf.nii`` —
+# breaking our cleanup pattern and forcing downstream tools that expect
+# uncompressed NIfTI (consistent with ica.py's choice) to gunzip first.
+_FSL_ENV_OVERRIDE = {"FSLOUTPUTTYPE": "NIFTI"}
 
 
 # Skull radius in mm used for converting rotations (radians) to translations
@@ -85,24 +92,44 @@ async def extract_motion_params(
     merged = output_dir / f"{task}-{run:02d}_merged.nii"
     motion_tsv = output_dir / f"{task}-{run:02d}_motion.tsv"
 
-    # 1. fslmerge -t : concatenate volumes along time.
+    # 1. fslmerge -t : concatenate volumes along time. Use uncompressed NIfTI
+    #    via FSLOUTPUTTYPE=NIFTI in subprocess env (shell default is GZ).
     merge_cmd = ["fslmerge", "-t", str(merged), *[str(v) for v in volumes]]
     if not await _run_with_timeout(merge_cmd, timeout_seconds, "fslmerge"):
         return None
+    # Sanity: fslmerge may still produce .nii.gz if the input list contains
+    # .nii.gz files. Resolve whichever exists.
+    merged_actual = _resolve_fsl_output(merged)
+    if merged_actual is None:
+        logger.warning("motion: fslmerge produced no output (expected near %s)", merged)
+        return None
 
-    # 2. mcflirt -plots : write motion params to <merged>_mcf.par.
-    mcflirt_cmd = ["mcflirt", "-in", str(merged), "-plots"]
+    # 2. mcflirt -plots : write motion params to <merged>_mcf.par. Pass -out
+    #    explicitly so mcflirt's output path is predictable regardless of
+    #    FSLOUTPUTTYPE.
+    mcf_basename = output_dir / f"{task}-{run:02d}_mcf"
+    mcflirt_cmd = [
+        "mcflirt",
+        "-in", str(merged_actual),
+        "-out", str(mcf_basename),
+        "-plots",
+    ]
     if not await _run_with_timeout(mcflirt_cmd, timeout_seconds, "mcflirt"):
-        if not keep_merged and merged.exists():
-            merged.unlink()
+        if not keep_merged:
+            for p in (merged, merged_actual):
+                if p.exists():
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
         return None
 
     # 3. Convert .par → BIDS-ish TSV with framewise displacement column.
-    par_path = merged.with_name(merged.name.replace(".nii", "_mcf.par"))
+    par_path = mcf_basename.with_suffix(".par")
     if not par_path.is_file():
-        # mcflirt sometimes appends suffix differently if input had .nii.gz
-        alt = output_dir / f"{merged.stem}_mcf.par"
-        par_path = alt if alt.is_file() else par_path
+        # Some FSL builds suffix differently — search neighborhood.
+        alt = next(output_dir.glob(f"{task}-{run:02d}_mcf*.par"), None)
+        par_path = alt if alt else par_path
     if not par_path.is_file():
         logger.warning("motion: mcflirt produced no .par file (looked for %s)", par_path)
         return None
@@ -113,13 +140,17 @@ async def extract_motion_params(
 
     # Cleanup: keep the .par alongside the TSV (provenance), drop the
     # large merged 4D + the mcflirt-corrected 4D unless asked to keep.
+    # FSLOUTPUTTYPE-NIFTI override means we expect plain .nii, but be
+    # defensive and clean both extensions.
     if not keep_merged:
-        for p in (merged, merged.with_name(merged.name.replace(".nii", "_mcf.nii"))):
-            if p.exists():
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
+        for stem in (merged, merged_actual, mcf_basename):
+            for ext in (".nii", ".nii.gz"):
+                p = Path(str(stem).removesuffix(".nii.gz").removesuffix(".nii") + ext)
+                if p.exists():
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
 
     logger.info(
         "motion: %d TRs of motion params extracted to %s", len(rows), motion_tsv
@@ -127,13 +158,30 @@ async def extract_motion_params(
     return motion_tsv
 
 
+def _resolve_fsl_output(stem: Path) -> Path | None:
+    """Return whichever of ``stem`` or ``stem.gz`` actually exists on disk."""
+    if stem.exists():
+        return stem
+    gz = Path(f"{stem}.gz")
+    if gz.exists():
+        return gz
+    return None
+
+
 async def _run_with_timeout(cmd: list[str], timeout: float, label: str) -> bool:
-    """Run ``cmd`` async and return True on rc=0, else log + False."""
+    """Run ``cmd`` async and return True on rc=0, else log + False.
+
+    Forces ``FSLOUTPUTTYPE=NIFTI`` in the subprocess env so mcflirt and
+    fslmerge produce uncompressed NIfTI consistently regardless of the
+    operator's shell defaults.
+    """
+    env = {**os.environ, **_FSL_ENV_OVERRIDE}
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
         try:
             _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)

@@ -101,6 +101,24 @@ class VsendStepExecutor:
                 self._config.run,
                 self._img_snapshot,
             )
+            # Best-effort motion extraction (see nf_run for rationale).
+            if renamed > 0:
+                try:
+                    from mindfulness_nf.orchestration import motion as motion_mod
+                    from mindfulness_nf.orchestration.layout import SubjectLayout
+
+                    _layout = SubjectLayout.from_session_dir(self._subject_dir)
+                    await motion_mod.extract_motion_params(
+                        img_dir=_layout.img_dir,
+                        output_dir=self._subject_dir / "derivatives" / "motion",
+                        task=self._config.task,
+                        run=self._config.run,
+                    )
+                except Exception:  # noqa: BLE001 — diagnostic only
+                    import logging as _logging
+                    _logging.getLogger(__name__).exception(
+                        "motion extraction raised for step %s", self._config.name
+                    )
             if renamed == 0 or renamed < self._target:
                 # Bug C guard: MURFI said the scan completed but saveImages
                 # produced no (or too few) on-disk volumes. This happened

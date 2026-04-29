@@ -8,6 +8,7 @@ from pathlib import Path
 
 from mindfulness_nf.config import PipelineConfig, ScannerConfig
 from mindfulness_nf.models import StepConfig
+from mindfulness_nf.orchestration import motion as motion_mod
 from mindfulness_nf.orchestration import murfi as murfi_mod
 from mindfulness_nf.orchestration import psychopy as psychopy_mod
 from mindfulness_nf.orchestration.executor import (
@@ -177,6 +178,24 @@ class NfRunStepExecutor:
                     self._config.run,
                     self._target,
                 )
+            # Best-effort post-step motion extraction. Skipped silently if
+            # FSL isn't on PATH or no volumes were saved. MURFI's GLM uses
+            # motion derivatives as regressors but does not write motion
+            # estimates to disk; this gives the analyst per-TR motion +
+            # framewise displacement.
+            if renamed > 0:
+                try:
+                    await motion_mod.extract_motion_params(
+                        img_dir=self._layout.img_dir,
+                        output_dir=self._subject_dir / "derivatives" / "motion",
+                        task=self._config.task,
+                        run=self._config.run,
+                    )
+                except Exception:  # noqa: BLE001 — diagnostic, never fail the step
+                    import logging as _logging
+                    _logging.getLogger(__name__).exception(
+                        "motion extraction raised for step %s", self._config.name
+                    )
         return outcome
 
     async def stop(self, timeout: float = 5.0) -> None:

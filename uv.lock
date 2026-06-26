@@ -1055,10 +1055,7 @@ dependencies = [
     { name = "nibabel" },
     { name = "numpy" },
     { name = "pandas" },
-    { name = "psychopy" },
-    { name = "psychtoolbox" },
     { name = "pydicom" },
-    { name = "pygame" },
     { name = "pynetdicom" },
     { name = "scipy" },
     { name = "textual" },
@@ -1067,6 +1064,11 @@ dependencies = [
 [package.optional-dependencies]
 dry-run = [
     { name = "nilearn" },
+]
+operator = [
+    { name = "psychopy" },
+    { name = "psychtoolbox" },
+    { name = "pygame" },
 ]
 
 [package.dev-dependencies]
@@ -1085,15 +1087,15 @@ requires-dist = [
     { name = "nilearn", marker = "extra == 'dry-run'", specifier = ">=0.10" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pandas", specifier = ">=2.0" },
-    { name = "psychopy" },
-    { name = "psychtoolbox" },
+    { name = "psychopy", marker = "extra == 'operator'" },
+    { name = "psychtoolbox", marker = "extra == 'operator'" },
     { name = "pydicom", specifier = ">=2.4" },
-    { name = "pygame" },
+    { name = "pygame", marker = "extra == 'operator'" },
     { name = "pynetdicom", specifier = ">=3.0.4" },
     { name = "scipy", specifier = ">=1.12" },
     { name = "textual", specifier = ">=8.0" },
 ]
-provides-extras = ["dry-run"]
+provides-extras = ["dry-run", "operator"]
 
 [package.metadata.requires-dev]
 dev = [

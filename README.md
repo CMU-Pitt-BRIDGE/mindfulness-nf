@@ -15,19 +15,35 @@ A scanner session costs the participant an hour and the lab a slot. Mid-session 
 Requires Python 3.13+, [uv](https://docs.astral.sh/uv/), FSL 6+, and Apptainer.
 
 ```bash
-git clone git@github.com:eduardojdiniz/mindfulness-nf.git
+git clone git@github.com:CMU-Pitt-BRIDGE/mindfulness-nf.git
 cd mindfulness-nf
 uv venv --python 3.13
-uv sync --extra dev
+uv sync                  # runtime + dev tools (dev is a default PEP 735 group)
+```
+
+On the **scanner PC**, also install the operator extra — PsychoPy plus the
+pygame/psychtoolbox hardware-timing deps the ball task needs. These are kept
+out of the base install because their wxpython build broke CI:
+
+```bash
+uv sync --extra operator
 ```
 
 ## Run a session
 
-Launch the TUI. It prompts for a subject ID, then for a session type.
+Launch the TUI from a terminal where FSL is on your `PATH` — a normal login
+shell that has sourced `/etc/profile.d/fsl.sh`. It prompts for a subject ID,
+then for a session type.
 
 ```bash
 uv run mindfulness-nf
 ```
+
+> **Launch from a terminal, not the desktop icon, for FSL work.** The desktop
+> entry inherits the graphical session's environment, which may not include
+> FSL. When `fslmerge`/`mcflirt` are not on `PATH`, motion extraction is
+> silently skipped and Process-session FSL steps fail with a
+> `FileNotFoundError`. Confirm with `command -v fslmerge` before a session.
 
 Pass `--subject` to skip the subject prompt.
 
@@ -39,10 +55,30 @@ uv run mindfulness-nf --subject sub-001
 
 | Key | Type | Purpose |
 |-----|------|---------|
-| 1 | Localizer (loc3) | Preflight, 2-volume reference, 2 resting-state runs |
+| 1 | Localizer (loc3) | Setup/preflight + 2 resting-state runs (250 vols each) |
 | 2 | RT15 | 9 steps: Setup, 2vol, Transfer Pre, Feedback 1-5, Transfer Post |
 | 3 | RT30 | 15 steps: RT15 plus Transfer Post 1, Feedback 6-10, Transfer Post 2 |
 | 4 | Process | FSL pipeline: merge, MELODIC, DMN/CEN extraction, registration, QC |
+
+### Session order
+
+Run the three session types in this order, using the **same `--subject` ID**
+throughout. Each step consumes what the previous one produced:
+
+1. **Localizer (`1`)** — collects two resting-state runs into
+   `murfi/subjects/sub-XXX/img/` as `img-rest-<run>-*.nii`.
+2. **Process (`4`)** — reads those rest volumes, runs the FSL pipeline
+   (merge → MELODIC → DMN/CEN extraction → registration → QC), and writes the
+   masks to `murfi/subjects/sub-XXX/mask/`.
+3. **RT15 (`2`) or RT30 (`3`)** — real-time neurofeedback; MURFI's `rtdmn.xml`
+   loads the DMN/CEN masks that Process produced.
+
+Process and the neurofeedback sessions cannot run until the Localizer has
+populated `img/`.
+
+> The Process **Merge rests** step ending with `no runs in subject img/ dir`
+> is **not a crash** — it means that subject's `img/` holds no `img-rest-*.nii`
+> volumes yet. Run the Localizer (`1`) for that subject first.
 
 ### Dry-run rehearsal
 
@@ -85,7 +121,16 @@ The help bar shows only keys valid for the current step status. Cursor navigatio
 
 ## Resume
 
-Force-quitting a session leaves `session_state.json` on disk. Relaunch with the same `--subject` and the same session type; the cursor lands where it was. Any step marked `running` at the time of the crash is coerced to `failed` on load. Partial `.nii` files stay on disk; press `r` on the failed step to clear them.
+Force-quitting a session leaves `session_state.json` on disk under
+`murfi/subjects/sub-XXX/ses-<type>/`. Relaunch with the same `--subject` and
+the same session type; the cursor lands where it was. Any step marked
+`running` at the time of the crash is coerced to `failed` on load (with
+`error="interrupted by restart"`). Partial `.nii` files stay on disk; press
+`r` on the failed step to clear them and re-run it.
+
+A fresh subject ID always starts clean. Reusing an ID that already has a
+`session_state.json` resumes that session instead of starting over — use a new
+ID for each new participant.
 
 ## Before a scanner session
 

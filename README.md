@@ -31,19 +31,20 @@ uv sync --extra operator
 
 ## Run a session
 
-Launch the TUI from a terminal where FSL is on your `PATH` — a normal login
-shell that has sourced `/etc/profile.d/fsl.sh`. It prompts for a subject ID,
-then for a session type.
+Launch the TUI from the **desktop icon** (how operators normally start it) or
+from a terminal. It prompts for a subject ID, then for a session type.
 
 ```bash
 uv run mindfulness-nf
 ```
 
-> **Launch from a terminal, not the desktop icon, for FSL work.** The desktop
-> entry inherits the graphical session's environment, which may not include
-> FSL. When `fslmerge`/`mcflirt` are not on `PATH`, motion extraction is
-> silently skipped and Process-session FSL steps fail with a
-> `FileNotFoundError`. Confirm with `command -v fslmerge` before a session.
+> **The desktop launcher must use a login shell** (`bash -lc`, set in
+> `~/Desktop/mindfulness-nf.desktop`). The GNOME session does not source
+> `/etc/profile.d`, so a plain `bash -c` would leave `fslmerge`/`mcflirt` off
+> `PATH` and Process-session FSL steps would fail with `FileNotFoundError`. The
+> `-l` flag sources `/etc/profile.d/fsl.sh` (you must be in the `fsl` group) so
+> FSL and the MURFI tools are available. If you rebuild the launcher, keep
+> `-l`; verify with `command -v fslmerge`.
 
 Pass `--subject` to skip the subject prompt.
 

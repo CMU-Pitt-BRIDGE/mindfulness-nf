@@ -1,9 +1,6 @@
 """Layer 1 tests: pure SessionState transitions.
 
-TDD red: imports below don't exist yet (they land in todo-5 with the
-replacement of ``mindfulness_nf/models.py``). This file is the executable
-specification for the state machine described in
-``docs/superpowers/specs/2026-04-20-session-runner-design.md``.
+This file is the executable specification for the pure state machine.
 
 All transitions under test are pure: each returns a new ``SessionState``.
 No I/O, no mocks — only assertions about inputs and outputs.

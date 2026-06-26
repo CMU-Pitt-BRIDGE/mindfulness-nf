@@ -57,8 +57,8 @@ uv run mindfulness-nf --subject sub-001
 | Key | Type | Purpose |
 |-----|------|---------|
 | 1 | Localizer (loc3) | Setup/preflight + 2 resting-state runs (250 vols each) |
-| 2 | RT15 | 9 steps: Setup, 2vol, Transfer Pre, Feedback 1-5, Transfer Post |
-| 3 | RT30 | 15 steps: RT15 plus Transfer Post 1, Feedback 6-10, Transfer Post 2 |
+| 2 | RT15 | 8 steps: Setup, Transfer Pre, Feedback 1-5, Transfer Post |
+| 3 | RT30 | 14 steps: RT15 plus Transfer Post 1, Feedback 6-10, Transfer Post 2 |
 | 4 | Process | FSL pipeline: merge, MELODIC, DMN/CEN extraction, registration, QC |
 
 ### Session order
@@ -67,7 +67,10 @@ Run the three session types in this order, using the **same `--subject` ID**
 throughout. Each step consumes what the previous one produced:
 
 1. **Localizer (`1`)** — collects two resting-state runs into
-   `murfi/subjects/sub-XXX/img/` as `img-rest-<run>-*.nii`.
+   `murfi/subjects/sub-XXX/img/`. MURFI writes a functional reference
+   (`xfm/series*_ref.nii`) from these runs; Process registers the DMN/CEN masks
+   to it. Because loc and rt run in one session (no repositioning), that one
+   reference serves the whole session — no separate 2-volume scan is needed.
 2. **Process (`4`)** — reads those rest volumes, runs the FSL pipeline
    (merge → MELODIC → DMN/CEN extraction → registration → QC), and writes the
    masks to `murfi/subjects/sub-XXX/mask/`.

@@ -86,15 +86,6 @@ RT15: tuple[StepConfig, ...] = (
         kind=StepKind.SETUP,
     ),
     StepConfig(
-        name="2-volume",
-        task="2vol",
-        run=1,
-        progress_target=2,
-        progress_unit="volumes",
-        xml_name="2vol.xml",
-        kind=StepKind.VSEND_SCAN,
-    ),
-    StepConfig(
         name="Transfer Pre",
         task="transferpre",
         run=1,
@@ -116,7 +107,9 @@ RT15: tuple[StepConfig, ...] = (
         feedback=False,
     ),
 )
-# RT15 has 9 steps: Setup, 2vol, TransferPre, Fb1-5, TransferPost.
+# RT15 has 8 steps: Setup, TransferPre, Fb1-5, TransferPost.
+# No 2-volume: loc and rt run in one session, so Process already registered
+# the masks to the localizer's reference (valid for the whole session).
 
 RT30: tuple[StepConfig, ...] = (
     *RT15[:-1],  # Setup through Feedback 5
@@ -142,7 +135,7 @@ RT30: tuple[StepConfig, ...] = (
         feedback=False,
     ),
 )
-# RT30 has 15 steps: Setup, 2vol, TransferPre, Fb1-5, TransferPost1, Fb6-10, TransferPost2.
+# RT30 has 14 steps: Setup, TransferPre, Fb1-5, TransferPost1, Fb6-10, TransferPost2.
 
 PROCESS: tuple[StepConfig, ...] = (
     StepConfig(

@@ -39,6 +39,7 @@ from textual.app import App
 
 from mindfulness_nf.models import (
     SessionState,
+    StepConfig,
     StepKind,
     StepStatus,
 )
@@ -583,7 +584,7 @@ class TestKeybindings:
             fresh_state,
             pipeline_config_test,
             scanner_config_test,
-            cursor=3,
+            cursor=2,  # Feedback 1 (Setup, TransferPre, Fb1) — no 2-volume now
         )
         fake = FakeStepExecutor(components=("murfi",))
         _install_fake(monkeypatch, runner, fake)
@@ -745,7 +746,7 @@ class TestKeybindings:
             fresh_state,
             pipeline_config_test,
             scanner_config_test,
-            cursor=3,
+            cursor=2,  # Feedback 1 (Setup, TransferPre, Fb1) — no 2-volume now
         )
         first = FakeStepExecutor(components=("murfi", "psychopy"))
         _install_fake(monkeypatch, runner, first)
@@ -1431,23 +1432,22 @@ class TestNavigation:
 class TestConfigsAndBids:
     """Static spot-checks: no pilot needed."""
 
-    def test_rt30_config_has_15_steps_with_13_feedback_phase_runs(self) -> None:
-        """RT30 = Setup + 2vol + 13 feedback-phase runs (TransferPre, Fb1-5, TP1, Fb6-10, TP2)."""
-        assert len(RT30) == 15
+    def test_rt30_config_has_14_steps_with_13_feedback_phase_runs(self) -> None:
+        """RT30 = Setup + 13 feedback-phase runs (TransferPre, Fb1-5, TP1, Fb6-10, TP2). No 2-volume."""
+        assert len(RT30) == 14
 
         # Expected step shape.
         kinds = [c.kind for c in RT30]
         assert kinds[0] is StepKind.SETUP
-        assert kinds[1] is StepKind.VSEND_SCAN
-        # The remaining 13 are NF_RUN.
-        assert all(k is StepKind.NF_RUN for k in kinds[2:])
+        # The remaining 13 are NF_RUN (no 2-volume VSEND_SCAN).
+        assert all(k is StepKind.NF_RUN for k in kinds[1:])
         assert len([k for k in kinds if k is StepKind.NF_RUN]) == 13
 
         # Name / run sanity.
         names = [c.name for c in RT30]
         assert names[0] == "Setup"
-        assert names[1] == "2-volume"
-        assert names[2] == "Transfer Pre"
+        assert names[1] == "Transfer Pre"
+        assert "2-volume" not in names
         assert "Feedback 1" in names
         assert "Feedback 10" in names
         assert "Transfer Post 1" in names
@@ -1458,7 +1458,6 @@ class TestConfigsAndBids:
         # RT15 expected (subject, session) labels.
         expected_rt15 = [
             (None, None),  # Setup
-            ("2vol", 1),
             ("transferpre", 1),
             ("feedback", 1),
             ("feedback", 2),
@@ -1473,7 +1472,6 @@ class TestConfigsAndBids:
         # RT30 expected.
         expected_rt30 = [
             (None, None),  # Setup
-            ("2vol", 1),
             ("transferpre", 1),
             ("feedback", 1),
             ("feedback", 2),
@@ -1522,7 +1520,12 @@ class TestConfigsAndBids:
         )
 
         source = SimulatedScannerSource(cache_dir=cache, tr_seconds=0.01)
-        step = RT15[1]
+        # A 2-volume VSEND step. No session config carries one anymore, but the
+        # sender is generic — fabricate one to exercise a small 2-volume push.
+        step = StepConfig(
+            name="2-volume", task="2vol", run=1, progress_target=2,
+            progress_unit="volumes", xml_name="2vol.xml", kind=StepKind.VSEND_SCAN,
+        )
         xml = tmp_path / "2vol.xml"
         xml.write_text("<xml/>")
 
@@ -1556,7 +1559,12 @@ class TestConfigsAndBids:
         )
 
         source = SimulatedScannerSource(cache_dir=cache, tr_seconds=0.01)
-        step = RT15[1]  # progress_target=2
+        # Fabricated 2-volume VSEND step (progress_target=2); no session
+        # config carries one anymore, but the sender is generic.
+        step = StepConfig(
+            name="2-volume", task="2vol", run=1, progress_target=2,
+            progress_unit="volumes", xml_name="2vol.xml", kind=StepKind.VSEND_SCAN,
+        )
 
         await source.push_dicom(
             target_host="localhost", target_port=4006, ae_title="MURFI", step=step

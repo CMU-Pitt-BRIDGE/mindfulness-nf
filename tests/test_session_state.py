@@ -454,6 +454,10 @@ def test_loc3_has_3_steps() -> None:
 
     assert len(LOC3) == 3
     assert [s.name for s in LOC3] == ["Setup", "Rest 1", "Rest 2"]
+    # No dedicated 2-volume: MURFI writes a series reference from the rest
+    # runs themselves, and loc+rt share one session, so Process registers the
+    # masks to that reference. (sub-morgan ran loc3 with no 2-volume.)
+    assert "2-volume" not in [s.name for s in LOC3]
     # Rest runs are real-time; scanner streams via MURFI's vSend TCP input
     # on port 50000. Port 4006 / DICOM is only for post-hoc transfers.
     rest1 = next(s for s in LOC3 if s.name == "Rest 1")
@@ -462,27 +466,30 @@ def test_loc3_has_3_steps() -> None:
     assert rest2.kind is StepKind.VSEND_SCAN
 
 
-def test_rt15_has_9_steps() -> None:
+def test_rt15_has_8_steps() -> None:
     from mindfulness_nf.sessions import RT15
 
-    assert len(RT15) == 9
+    assert len(RT15) == 8
     assert RT15[0].name == "Setup"
-    assert RT15[1].name == "2-volume"
-    assert RT15[2].name == "Transfer Pre"
-    assert [s.name for s in RT15[3:8]] == [f"Feedback {i}" for i in range(1, 6)]
+    assert RT15[1].name == "Transfer Pre"
+    assert [s.name for s in RT15[2:7]] == [f"Feedback {i}" for i in range(1, 6)]
     assert RT15[-1].name == "Transfer Post"
+    # No 2-volume: same-session reference comes from the localizer; feedback
+    # runs self-reference via align=true on the masks Process already placed.
+    assert "2-volume" not in [s.name for s in RT15]
 
 
-def test_rt30_has_15_steps() -> None:
+def test_rt30_has_14_steps() -> None:
     from mindfulness_nf.sessions import RT30
 
-    assert len(RT30) == 15
+    assert len(RT30) == 14
     names = [s.name for s in RT30]
-    assert names[0:3] == ["Setup", "2-volume", "Transfer Pre"]
-    assert names[3:8] == [f"Feedback {i}" for i in range(1, 6)]
-    assert names[8] == "Transfer Post 1"
-    assert names[9:14] == [f"Feedback {i}" for i in range(6, 11)]
-    assert names[14] == "Transfer Post 2"
+    assert names[0:2] == ["Setup", "Transfer Pre"]
+    assert names[2:7] == [f"Feedback {i}" for i in range(1, 6)]
+    assert names[7] == "Transfer Post 1"
+    assert names[8:13] == [f"Feedback {i}" for i in range(6, 11)]
+    assert names[13] == "Transfer Post 2"
+    assert "2-volume" not in names
 
 
 def test_process_has_7_steps() -> None:
@@ -507,10 +514,10 @@ def test_bids_task_names_match_scanner_pdfs() -> None:
 
     assert {s.task for s in LOC3 if s.task} == {"rest"}
     assert {s.task for s in RT15 if s.task} == {
-        "2vol", "transferpre", "feedback", "transferpost",
+        "transferpre", "feedback", "transferpost",
     }
     assert {s.task for s in RT30 if s.task} == {
-        "2vol", "transferpre", "feedback", "transferpost",
+        "transferpre", "feedback", "transferpost",
     }
 
 

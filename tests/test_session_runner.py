@@ -115,8 +115,8 @@ def nf_runner(
 ) -> SessionRunner:
     """Runner positioned on a feedback (NF_RUN) step with murfi+psychopy components."""
     state = fresh_state("rt15")
-    # Index 3 is Feedback 1 (Setup, 2vol, TransferPre, Fb1, ...).
-    state = state.select(3)
+    # Index 2 is Feedback 1 (Setup, TransferPre, Fb1, ...) — no 2-volume now.
+    state = state.select(2)
     return SessionRunner(
         state=state,
         subject_dir=tmp_path,

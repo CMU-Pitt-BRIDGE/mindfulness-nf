@@ -956,6 +956,31 @@ class TestKeybindings:
             await pilot.pause()
             assert isinstance(app.screen, SessionScreen)
 
+    def test_help_text_key_hints_are_literal_not_markup(
+        self,
+        tmp_path: Path,
+        fresh_state: Any,
+        pipeline_config_test: Any,
+        scanner_config_test: Any,
+    ) -> None:
+        """Help-bar key hints like [s]/[i]/[b] must not be parsed as Rich
+        markup (strike/italic/bold). The text carries no style spans."""
+        from rich.text import Text
+
+        from mindfulness_nf.tui.screens.session import SessionScreen
+
+        runner = _make_runner(
+            tmp_path,
+            fresh_state,
+            pipeline_config_test,
+            scanner_config_test,
+            cursor=1,
+        )
+        screen = SessionScreen(runner)
+        parsed = Text.from_markup(screen._help_text(runner.state))
+        assert parsed.spans == []
+        assert "[s] Menu" in parsed.plain
+
 
 # ---------------------------------------------------------------------------
 # TestStateInvariants

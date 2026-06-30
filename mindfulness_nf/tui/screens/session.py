@@ -7,6 +7,7 @@ All keybindings, help bar, recovery flows, and screen lifecycle live here.
 
 from __future__ import annotations
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
@@ -354,7 +355,9 @@ class SessionScreen(Screen[None]):
         parts.append("[b/n] Navigate")
         parts.append("[s] Menu")
         parts.append("[esc] Quit")
-        return "  ".join(parts)
+        # Escape so the [key] hints render literally; otherwise Rich reads
+        # [s]/[i]/[b] as strikethrough/italic/bold markup tags.
+        return escape("  ".join(parts))
 
     # ------------------------------------------------------------------
     # Keybinding handlers

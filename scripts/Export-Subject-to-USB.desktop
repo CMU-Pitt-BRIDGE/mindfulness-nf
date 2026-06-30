@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Export Subject to USB
+GenericName=Subject data export
+Comment=Pick a USB drive and a subject, then copy the data
+Exec=bash /home/young-lab/code/mindfulness-nf/scripts/export_to_usb.sh
+Path=/home/young-lab/code/mindfulness-nf
+Icon=drive-removable-media
+Terminal=false
+Categories=Science;
+StartupNotify=true

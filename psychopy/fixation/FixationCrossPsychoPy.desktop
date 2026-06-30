@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Fixation Cross — PsychoPy (fallback)
+GenericName=fMRI Fixation Target (live PsychoPy window)
+Comment=Live PsychoPy render. Fallback only — closes via ESC/Q ONLY when the BOLDscreen window has keyboard focus, which it usually does not from the console. Prefer "Fixation Cross (Resting State)".
+Exec=/home/young-lab/code/mindfulness-nf/.venv/bin/python /home/young-lab/code/mindfulness-nf/psychopy/fixation/fixation_cross.py
+Path=/home/young-lab/code/mindfulness-nf
+Icon=view-fullscreen
+Terminal=false
+Categories=Science;
+Keywords=fMRI;fixation;rest;psychopy;fallback
+StartupNotify=true

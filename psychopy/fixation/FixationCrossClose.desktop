@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Close Fixation Cross
+GenericName=Hide fMRI Fixation Target
+Comment=Closes the resting-state fixation from the console. Works even though the BOLDscreen window never holds keyboard focus (sends a signal, not a keypress).
+Exec=pkill -f FixationCross.png
+Path=/home/young-lab/code/mindfulness-nf
+Icon=window-close
+Terminal=false
+Categories=Science;
+Keywords=fMRI;fixation;rest;close;stop
+StartupNotify=false

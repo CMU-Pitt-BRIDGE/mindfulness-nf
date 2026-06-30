@@ -132,6 +132,30 @@ def step_volume_glob(task: str, run_number: int) -> str:
     """Glob pattern for one step's task+run-keyed volumes."""
     return f"img-{task}-{run_number:02d}-*.nii"
 
+
+def clear_step_raw_volumes(img_dir: Path, task: str, run_number: int) -> int:
+    """Delete the raw per-volume NIfTIs for one step's ``(task, run)``.
+
+    Used after motion extraction to reclaim disk for feedback/transfer runs:
+    nothing in the pipeline consumes their raw images (only ``img-rest-*``
+    feeds Process/ICA) and the scanner retains the full series. Matches only
+    ``img-<task>-<run>-*.nii`` — like :func:`clear_bids_run_files`, the
+    task+run keying means a feedback-run cleanup can never touch Rest 1.
+
+    Best-effort: a missing dir or an unlink failure is logged, never raised.
+    Returns the number of files deleted.
+    """
+    if not img_dir.is_dir():
+        return 0
+    deleted = 0
+    for path in sorted(img_dir.glob(step_volume_glob(task, run_number))):
+        try:
+            path.unlink()
+            deleted += 1
+        except OSError:
+            logger.exception("failed to unlink raw volume %s", path)
+    return deleted
+
 # JSON schema version for BIDS session_state.json.  Bump when shape changes.
 _SCHEMA_VERSION = 1
 

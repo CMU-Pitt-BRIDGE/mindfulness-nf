@@ -203,6 +203,16 @@ class SessionScreen(Screen[None]):
         """Subscribe to the runner and paint initial state."""
         self._runner.subscribe(self._on_state_change)
         self._repaint(self._runner.state)
+        # Safety-net repaint. Event-driven _on_state_change handles instant
+        # updates, but after a subprocess phase ends the event loop can go
+        # quiet (notably during post-step motion extraction, ~10-40s), so the
+        # final completion repaint may not render until the operator navigates.
+        # A light periodic repaint keeps the status honest on its own.
+        self.set_interval(0.3, self._refresh_tick)
+
+    def _refresh_tick(self) -> None:
+        """Periodic safety-net repaint from the current runner state."""
+        self._on_state_change(self._runner.state)
 
     async def on_unmount(self) -> None:
         """Critical (spec G7): await stop_current so no task is orphaned."""

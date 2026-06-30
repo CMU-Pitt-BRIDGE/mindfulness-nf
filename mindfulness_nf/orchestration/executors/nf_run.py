@@ -185,6 +185,10 @@ class NfRunStepExecutor:
             # estimates to disk; this gives the analyst per-TR motion +
             # framewise displacement.
             if renamed > 0:
+                # Surface post-step work: motion extraction can take ~10-40s,
+                # so without this the closed ball task looks like a stalled
+                # step sitting at 150/150.
+                on_progress(self._phase2_snapshot("extracting motion params"))
                 motion_tsv = None
                 try:
                     motion_tsv = await motion_mod.extract_motion_params(

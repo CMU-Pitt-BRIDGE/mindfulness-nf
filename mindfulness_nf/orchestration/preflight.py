@@ -23,6 +23,30 @@ async def check_fsl_on_path() -> CheckResult:
     return CheckResult(name="FSL on PATH", passed=False, message="FSL not on PATH")
 
 
+async def check_vsend_on_path() -> CheckResult:
+    """Confirm the in-process Python vSend sender is importable.
+
+    Replaces the old ``vSend`` binary discovery. :class:`SimulatedScannerSource`
+    now streams volumes to MURFI via a vendored :class:`ExternalImage`-based
+    sender, so "installation" is just a successful import.
+    """
+    try:
+        from mindfulness_nf.orchestration.scanner_source import (  # noqa: F401
+            _send_nifti_via_vsend,
+        )
+    except ImportError as exc:  # pragma: no cover — repo invariant
+        return CheckResult(
+            name="vSend on PATH",
+            passed=False,
+            message=f"vSend sender module not importable: {exc}",
+        )
+    return CheckResult(
+        name="vSend on PATH",
+        passed=True,
+        message="Python vSend sender available",
+    )
+
+
 async def check_apptainer_installed() -> CheckResult:
     """Check that Apptainer is installed."""
     if shutil.which("apptainer") is not None:
@@ -284,9 +308,9 @@ async def check_firewall_port_4006() -> CheckResult:
 
 
 async def check_stale_murfi_processes() -> CheckResult:
-    """Check for stale MURFI processes on ports 50000 and 15001."""
+    """Check for stale MURFI / DICOM processes on ports 50000, 15001, 4006."""
     stale_ports: list[int] = []
-    for port in (50000, 15001):
+    for port in (50000, 15001, 4006):
         try:
             result = await asyncio.to_thread(
                 subprocess.run,
@@ -335,6 +359,7 @@ async def run_preflight(
     """
     async with asyncio.TaskGroup() as tg:
         t_fsl = tg.create_task(check_fsl_on_path())
+        t_vsend = tg.create_task(check_vsend_on_path())
         t_apptainer = tg.create_task(check_apptainer_installed())
         t_container = tg.create_task(check_container_exists(config.murfi_container))
         t_subject = tg.create_task(check_subject_directory(subject_dir))
@@ -350,6 +375,7 @@ async def run_preflight(
 
     return (
         t_fsl.result(),
+        t_vsend.result(),
         t_apptainer.result(),
         t_container.result(),
         t_subject.result(),

@@ -8,6 +8,10 @@
   <option name="tr">             1.2 </option>
   <option name="measurements">    2 </option>
   <option name="port">           50000 </option>
+  <!-- `save` enables disk writes; `saveImages` enables in-memory accept.
+       Both are needed to land raw img-*.nii on disk. See rtdmn.xml for
+       background on the missing `save` option (Bug C, sub-morgan). -->
+  <option name="save">           true </option>
   <option name="saveImages">     true </option>
   <option name="receiveImages">  true </option>
   <option name="onlyReadMoCo">  true </option>

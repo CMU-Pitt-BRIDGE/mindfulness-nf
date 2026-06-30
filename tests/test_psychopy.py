@@ -75,7 +75,12 @@ class TestLaunch:
                 psychopy_dir=tmp_path,
             )
 
-            mock_exec.assert_called_once_with(
+            # The launcher now also passes ``env`` so it can thread
+            # MINDFULNESS_NF_PSYCHOPY_DATA_DIR through to the script. Verify
+            # positional + key args separately to avoid coupling the test to
+            # every env var on the system.
+            args, kwargs = mock_exec.call_args
+            assert args == (
                 sys.executable,
                 "rt-network_feedback.py",
                 "sub-001",
@@ -84,11 +89,40 @@ class TestLaunch:
                 "15min",
                 "peace",
                 "calm",
-                cwd=str(tmp_path),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
             )
+            assert kwargs["cwd"] == str(tmp_path)
+            assert kwargs["stdout"] == asyncio.subprocess.PIPE
+            assert kwargs["stderr"] == asyncio.subprocess.PIPE
+            assert "env" in kwargs
+            # No data_dir passed → env must NOT contain the override key.
+            assert "MINDFULNESS_NF_PSYCHOPY_DATA_DIR" not in kwargs["env"]
             assert proc is mock_process
+
+    @pytest.mark.asyncio
+    async def test_launch_threads_data_dir_via_env(self, tmp_path: Path) -> None:
+        """When ``data_dir`` is passed, it routes via env var so PsychoPy
+        writes into the session tree (``ses-*/sourcedata/psychopy/``)."""
+        mock_process = AsyncMock()
+        data_dir = tmp_path / "ses-rt15" / "sourcedata" / "psychopy"
+
+        with patch(
+            "asyncio.create_subprocess_exec", return_value=mock_process
+        ) as mock_exec:
+            await launch(
+                subject="sub-001",
+                run_number=1,
+                feedback=True,
+                psychopy_dir=tmp_path,
+                data_dir=data_dir,
+            )
+
+            _args, kwargs = mock_exec.call_args
+            assert (
+                kwargs["env"]["MINDFULNESS_NF_PSYCHOPY_DATA_DIR"]
+                == str(data_dir.resolve())
+            )
+            # The launcher creates the dir so the script doesn't race.
+            assert data_dir.is_dir()
 
     @pytest.mark.asyncio
     async def test_launch_no_feedback(self, tmp_path: Path) -> None:
@@ -204,25 +238,25 @@ class TestGetScaleFactor:
 
     def test_missing_csv_returns_default(self, tmp_path: Path) -> None:
         """When CSV does not exist, return the default scale factor."""
-        result = get_scale_factor(tmp_path, "sub-001", previous_run=1)
+        result = get_scale_factor(tmp_path, "sub-001", previous_run=1, task="feedback")
         assert result == 10.0
 
     def test_empty_csv_returns_default(self, tmp_path: Path) -> None:
         """When CSV has only a header, return the default."""
-        csv_path = tmp_path / "sub-001" / "run1.csv"
+        csv_path = tmp_path / "sub-001" / "sub-001_DMN_feedback_1_roi_outputs.csv"
         csv_path.parent.mkdir(parents=True)
         csv_path.write_text(CSV_HEADER + "\n")
 
-        result = get_scale_factor(tmp_path, "sub-001", previous_run=1)
+        result = get_scale_factor(tmp_path, "sub-001", previous_run=1, task="feedback")
         assert result == 10.0
 
     def test_hits_in_range_keeps_scale_factor(self, tmp_path: Path) -> None:
         """When hits are within [min_hits, max_hits], scale factor is unchanged."""
-        csv_path = tmp_path / "sub-001" / "run1.csv"
+        csv_path = tmp_path / "sub-001" / "sub-001_DMN_feedback_1_roi_outputs.csv"
         _write_csv(csv_path, scale_factor=10.0, cen_hits=2, dmn_hits=2)
 
         result = get_scale_factor(
-            tmp_path, "sub-001", previous_run=1,
+            tmp_path, "sub-001", previous_run=1, task="feedback",
             min_hits=3, max_hits=5,
         )
         # cen_hits + dmn_hits = 4 >= min_hits=3, and neither exceeds max_hits=5
@@ -230,11 +264,11 @@ class TestGetScaleFactor:
 
     def test_below_min_hits_increases_scale(self, tmp_path: Path) -> None:
         """When total hits < min_hits, scale factor is increased."""
-        csv_path = tmp_path / "sub-001" / "run1.csv"
+        csv_path = tmp_path / "sub-001" / "sub-001_DMN_feedback_1_roi_outputs.csv"
         _write_csv(csv_path, scale_factor=10.0, cen_hits=1, dmn_hits=0)
 
         result = get_scale_factor(
-            tmp_path, "sub-001", previous_run=1,
+            tmp_path, "sub-001", previous_run=1, task="feedback",
             min_hits=3, max_hits=5,
             increase=1.25,
         )
@@ -243,11 +277,11 @@ class TestGetScaleFactor:
 
     def test_above_max_hits_decreases_scale(self, tmp_path: Path) -> None:
         """When either hit count > max_hits, scale factor is decreased."""
-        csv_path = tmp_path / "sub-001" / "run1.csv"
+        csv_path = tmp_path / "sub-001" / "sub-001_DMN_feedback_1_roi_outputs.csv"
         _write_csv(csv_path, scale_factor=10.0, cen_hits=6, dmn_hits=2)
 
         result = get_scale_factor(
-            tmp_path, "sub-001", previous_run=1,
+            tmp_path, "sub-001", previous_run=1, task="feedback",
             min_hits=3, max_hits=5,
             decrease=0.75,
         )
@@ -256,11 +290,11 @@ class TestGetScaleFactor:
 
     def test_dmn_above_max_hits_decreases_scale(self, tmp_path: Path) -> None:
         """DMN hits exceeding max also triggers decrease."""
-        csv_path = tmp_path / "sub-001" / "run1.csv"
+        csv_path = tmp_path / "sub-001" / "sub-001_DMN_feedback_1_roi_outputs.csv"
         _write_csv(csv_path, scale_factor=8.0, cen_hits=2, dmn_hits=7)
 
         result = get_scale_factor(
-            tmp_path, "sub-001", previous_run=1,
+            tmp_path, "sub-001", previous_run=1, task="feedback",
             min_hits=3, max_hits=5,
             decrease=0.75,
         )
@@ -268,16 +302,16 @@ class TestGetScaleFactor:
 
     def test_custom_default(self, tmp_path: Path) -> None:
         """Custom default is returned when CSV is missing."""
-        result = get_scale_factor(tmp_path, "sub-001", previous_run=1, default=20.0)
+        result = get_scale_factor(tmp_path, "sub-001", previous_run=1, task="feedback", default=20.0)
         assert result == 20.0
 
     def test_uses_previous_scale_factor_from_csv(self, tmp_path: Path) -> None:
         """The adjustment is applied to the scale_factor from the CSV, not the default."""
-        csv_path = tmp_path / "sub-001" / "run2.csv"
+        csv_path = tmp_path / "sub-001" / "sub-001_DMN_feedback_2_roi_outputs.csv"
         _write_csv(csv_path, scale_factor=5.0, cen_hits=0, dmn_hits=0)
 
         result = get_scale_factor(
-            tmp_path, "sub-001", previous_run=2,
+            tmp_path, "sub-001", previous_run=2, task="feedback",
             default=10.0, min_hits=3, increase=1.25,
         )
         # total = 0 < min_hits=3 → increase from 5.0, not default 10.0
@@ -285,11 +319,11 @@ class TestGetScaleFactor:
 
     def test_malformed_csv_returns_default(self, tmp_path: Path) -> None:
         """CSV with missing columns returns default."""
-        csv_path = tmp_path / "sub-001" / "run1.csv"
+        csv_path = tmp_path / "sub-001" / "sub-001_DMN_feedback_1_roi_outputs.csv"
         csv_path.parent.mkdir(parents=True)
         csv_path.write_text("volume,time\n1,0.0\n")
 
-        result = get_scale_factor(tmp_path, "sub-001", previous_run=1)
+        result = get_scale_factor(tmp_path, "sub-001", previous_run=1, task="feedback")
         assert result == 10.0
 
 
@@ -302,34 +336,34 @@ class TestGetPreviousScaleFactor:
     """Test reading the scale_factor column from a previous run."""
 
     def test_returns_scale_factor_from_csv(self, tmp_path: Path) -> None:
-        csv_path = tmp_path / "sub-001" / "run1.csv"
+        csv_path = tmp_path / "sub-001" / "sub-001_DMN_feedback_1_roi_outputs.csv"
         _write_csv(csv_path, scale_factor=7.5)
 
-        result = get_previous_scale_factor(tmp_path, "sub-001", previous_run=1)
+        result = get_previous_scale_factor(tmp_path, "sub-001", previous_run=1, task="feedback")
         assert result == 7.5
 
     def test_missing_csv_returns_default(self, tmp_path: Path) -> None:
-        result = get_previous_scale_factor(tmp_path, "sub-001", previous_run=1)
+        result = get_previous_scale_factor(tmp_path, "sub-001", previous_run=1, task="feedback")
         assert result == 10.0
 
     def test_custom_default(self, tmp_path: Path) -> None:
         result = get_previous_scale_factor(
-            tmp_path, "sub-001", previous_run=1, default=20.0
+            tmp_path, "sub-001", previous_run=1, task="feedback", default=20.0
         )
         assert result == 20.0
 
     def test_empty_csv_returns_default(self, tmp_path: Path) -> None:
-        csv_path = tmp_path / "sub-001" / "run1.csv"
+        csv_path = tmp_path / "sub-001" / "sub-001_DMN_feedback_1_roi_outputs.csv"
         csv_path.parent.mkdir(parents=True)
         csv_path.write_text(CSV_HEADER + "\n")
 
-        result = get_previous_scale_factor(tmp_path, "sub-001", previous_run=1)
+        result = get_previous_scale_factor(tmp_path, "sub-001", previous_run=1, task="feedback")
         assert result == 10.0
 
     def test_malformed_csv_returns_default(self, tmp_path: Path) -> None:
-        csv_path = tmp_path / "sub-001" / "run1.csv"
+        csv_path = tmp_path / "sub-001" / "sub-001_DMN_feedback_1_roi_outputs.csv"
         csv_path.parent.mkdir(parents=True)
         csv_path.write_text("volume,time\n1,0.0\n")
 
-        result = get_previous_scale_factor(tmp_path, "sub-001", previous_run=1)
+        result = get_previous_scale_factor(tmp_path, "sub-001", previous_run=1, task="feedback")
         assert result == 10.0

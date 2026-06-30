@@ -192,6 +192,32 @@ murfi/subjects/sub-001/ses-rt15/
   derivatives/masks/{DMN,CEN}.nii
 ```
 
+## Getting data off the workstation
+
+A subject's full dataset is the self-contained folder `murfi/subjects/sub-XXX/`.
+To copy it to a USB drive (or any destination), use the export helper — it
+**never deletes anything**:
+
+```bash
+bash scripts/export_subject.sh sub-XXX                  # auto-detects a single USB under /media/$USER
+bash scripts/export_subject.sh sub-XXX /media/young-lab/MYDRIVE   # explicit destination
+```
+
+By default it **excludes the raw per-volume images** (`img/img-*.nii`) — the
+scanner already holds the full series, and everything analysis-relevant is kept
+regardless: PsychoPy feedback data (`roi_outputs.csv`, events TSVs, sliders,
+logs), MURFI logs, DMN/CEN masks, the ICA, motion params, and the
+`curact-*`/`design-*` activation maps for reproducing the feedback plots.
+
+| Mode | Includes | Approx size |
+|------|----------|-------------|
+| (default) | everything except raw images | ~3–9 GB |
+| `--lean` | also skips regenerable FSL dirs (`*.gica`/`*.ica`/`*.feat`) | ~3–4 GB |
+| `--full` | bit-for-bit, including raw images | ~12 GB |
+
+Subjects run after the raw-feedback-image cleanup are smaller. Add `--dry-run`
+to preview; after it finishes, verify the copy and eject the drive.
+
 ## Protocol constants
 
 | Constant | Value |

@@ -21,7 +21,7 @@ uv venv --python 3.13
 uv sync                  # runtime + dev tools (dev is a default PEP 735 group)
 ```
 
-On the **scanner PC**, also install the operator extra — PsychoPy plus the
+On the **scanner PC**, also install the operator extra: PsychoPy plus the
 pygame/psychtoolbox hardware-timing deps the ball task needs. These are kept
 out of the base install because their wxpython build broke CI:
 
@@ -66,22 +66,22 @@ uv run mindfulness-nf --subject sub-001
 Run the three session types in this order, using the **same `--subject` ID**
 throughout. Each step consumes what the previous one produced:
 
-1. **Localizer (`1`)** — collects two resting-state runs into
+1. **Localizer (`1`)** collects two resting-state runs into
    `murfi/subjects/sub-XXX/img/`. MURFI writes a functional reference
    (`xfm/series*_ref.nii`) from these runs; Process registers the DMN/CEN masks
    to it. Because loc and rt run in one session (no repositioning), that one
-   reference serves the whole session — no separate 2-volume scan is needed.
-2. **Process (`4`)** — reads those rest volumes, runs the FSL pipeline
-   (merge → MELODIC → DMN/CEN extraction → registration → QC), and writes the
-   masks to `murfi/subjects/sub-XXX/mask/`.
-3. **RT15 (`2`) or RT30 (`3`)** — real-time neurofeedback; MURFI's `rtdmn.xml`
-   loads the DMN/CEN masks that Process produced.
+   reference serves the whole session; no separate 2-volume scan is needed.
+2. **Process (`4`)** reads those rest volumes, runs the FSL pipeline
+   (merge, MELODIC, DMN/CEN extraction, registration, QC), and writes the masks
+   to `murfi/subjects/sub-XXX/mask/`.
+3. **RT15 (`2`) or RT30 (`3`)** run real-time neurofeedback; MURFI's `rtdmn.xml`
+   loads the masks Process produced.
 
 Process and the neurofeedback sessions cannot run until the Localizer has
 populated `img/`.
 
 > The Process **Merge rests** step ending with `no runs in subject img/ dir`
-> is **not a crash** — it means that subject's `img/` holds no `img-rest-*.nii`
+> is **not a crash**. It means that subject's `img/` holds no `img-rest-*.nii`
 > volumes yet. Run the Localizer (`1`) for that subject first.
 
 ### Dry-run rehearsal
@@ -119,7 +119,8 @@ The help bar shows only keys valid for the current step status. Cursor navigatio
 | `g` | any | Prompt for step number; jump cursor |
 | `m` | status=running, `murfi` in components | Relaunch MURFI; keep data and progress |
 | `p` | status=running, `psychopy` in components | Relaunch PsychoPy; keep data and progress |
-| `esc` | any | Quit; prompts before stopping a running step |
+| `s` | any | Return to the session menu (1/2/3/4); prompts before stopping a running step |
+| `esc` | any | Quit the app; prompts before stopping a running step |
 
 `r` destroys on-disk data for the step. `m` and `p` keep data; they restart one subprocess.
 
@@ -133,7 +134,7 @@ the same session type; the cursor lands where it was. Any step marked
 `r` on the failed step to clear them and re-run it.
 
 A fresh subject ID always starts clean. Reusing an ID that already has a
-`session_state.json` resumes that session instead of starting over — use a new
+`session_state.json` resumes that session instead of starting over. Use a new
 ID for each new participant.
 
 ## Before a scanner session
@@ -181,23 +182,59 @@ Ports 50000 and 4006 must be open for the scanner subnet (192.168.2.0/24). Wi-Fi
 
 ## BIDS layout
 
-Each session writes to `murfi/subjects/sub-XXX/ses-<type>/` with `func/`, `sourcedata/`, `derivatives/`, and `session_state.json`. Raw MURFI output lives in `sourcedata/murfi/img/`; on step completion the runner publishes a BIDS-named NIfTI under `func/` with a JSON sidecar.
+A subject is one folder, `murfi/subjects/sub-XXX/`:
 
 ```
-murfi/subjects/sub-001/ses-rt15/
-  session_state.json
-  func/sub-001_ses-rt15_task-feedback_run-01_bold.nii
-  sourcedata/murfi/{xml,img,log}/
-  sourcedata/psychopy/sub-001_ses-rt15_run01.csv
-  derivatives/masks/{DMN,CEN}.nii
+murfi/subjects/sub-XXX/
+  img/                       raw per-volume NIfTIs; curact-*/design-* (activation maps)
+  mask/                      dmn.nii, cen.nii  (loaded by rtdmn.xml)
+  xfm/                       series*_ref.nii, study_ref.nii  (registration)
+  ses-loc3/ ses-process/ ses-rt15/
+    session_state.json
+    sourcedata/murfi/{log,xml}/
+    sourcedata/psychopy/sub-XXX/    roi_outputs.csv, events TSVs, sliders, logs
+    derivatives/motion/<task>-<run>_motion.tsv
+  ses-process/rest/          merged *_bold.nii + rs_network.gica (ICA)
+  sub-XXX_sessions.tsv
 ```
+
+Rest images stay in `img/`; Process reads them. Feedback and transfer images
+are deleted after motion extraction, since the scanner keeps the full series.
+The runner does not write merged `func/` NIfTIs.
+
+## Getting data off the workstation
+
+A subject's full dataset is the folder `murfi/subjects/sub-XXX/`. Copy it to a
+USB drive with the export helper, which never deletes anything:
+
+```bash
+bash scripts/export_subject.sh sub-XXX                  # auto-detects a single USB under /media/$USER
+bash scripts/export_subject.sh sub-XXX /media/young-lab/MYDRIVE   # explicit destination
+```
+
+It detects the USB by listing drives under `/media/$USER`: one match, it uses
+it; zero or several, it asks for an explicit destination. The desktop also has
+a `Subject Data` link to `murfi/subjects/` for copying by hand.
+
+By default it excludes the raw per-volume images (`img/img-*.nii`); the scanner
+holds the full series. It keeps everything analysis-relevant: PsychoPy data
+(`roi_outputs.csv`, events TSVs, sliders, logs), MURFI logs, DMN/CEN masks, the
+ICA, motion params, and the `curact-*`/`design-*` activation maps.
+
+| Mode | Includes | Approx size |
+|------|----------|-------------|
+| (default) | everything except raw images | ~3-9 GB |
+| `--lean` | also skips regenerable FSL dirs (`*.gica`/`*.ica`/`*.feat`) | ~3-4 GB |
+| `--full` | bit-for-bit, including raw images | ~12 GB |
+
+Subjects run after the feedback-image cleanup are smaller. Add `--dry-run` to
+preview; afterward, verify the copy and eject the drive.
 
 ## Protocol constants
 
 | Constant | Value |
 |----------|-------|
 | TR | 1.2 s |
-| 2-volume measurements | 2 |
 | Resting-state measurements | 250 |
 | Feedback measurements | 150 |
 | PsychoPy run duration | 150 s |

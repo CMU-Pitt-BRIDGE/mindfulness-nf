@@ -7,6 +7,7 @@ All keybindings, help bar, recovery flows, and screen lifecycle live here.
 
 from __future__ import annotations
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
@@ -138,6 +139,7 @@ class SessionScreen(Screen[None]):
         Binding("g", "gkey", "Go to", show=False),
         Binding("m", "mkey", "Relaunch MURFI", show=True),
         Binding("p", "pkey", "Relaunch PsychoPy", show=True),
+        Binding("s", "skey", "Menu", show=True),
         Binding("escape", "esckey", "Quit", show=True),
     ]
 
@@ -203,6 +205,16 @@ class SessionScreen(Screen[None]):
         """Subscribe to the runner and paint initial state."""
         self._runner.subscribe(self._on_state_change)
         self._repaint(self._runner.state)
+        # Safety-net repaint. Event-driven _on_state_change handles instant
+        # updates, but after a subprocess phase ends the event loop can go
+        # quiet (notably during post-step motion extraction, ~10-40s), so the
+        # final completion repaint may not render until the operator navigates.
+        # A light periodic repaint keeps the status honest on its own.
+        self.set_interval(0.3, self._refresh_tick)
+
+    def _refresh_tick(self) -> None:
+        """Periodic safety-net repaint from the current runner state."""
+        self._on_state_change(self._runner.state)
 
     async def on_unmount(self) -> None:
         """Critical (spec G7): await stop_current so no task is orphaned."""
@@ -341,8 +353,11 @@ class SessionScreen(Screen[None]):
                 )
 
         parts.append("[b/n] Navigate")
+        parts.append("[s] Menu")
         parts.append("[esc] Quit")
-        return "  ".join(parts)
+        # Escape so the [key] hints render literally; otherwise Rich reads
+        # [s]/[i]/[b] as strikethrough/italic/bold markup tags.
+        return escape("  ".join(parts))
 
     # ------------------------------------------------------------------
     # Keybinding handlers
@@ -458,6 +473,27 @@ class SessionScreen(Screen[None]):
             self._notify(f"{component.upper()} not applicable to this step")
             return
         await self._runner.relaunch_component(component)
+
+    async def action_skey(self) -> None:
+        """S: return to the session-select menu (the 1/2/3/4 screen).
+
+        Pops this screen. Confirms first if a step is running, since leaving
+        stops the current run (``on_unmount`` calls ``stop_current``).
+        """
+        if self._runner.state.running_index is not None:
+            self.app.push_screen(
+                _ConfirmModal("Stop current run and return to the menu? [Y/N]"),
+                callback=self._on_menu_confirm,
+            )
+            return
+        self.app.pop_screen()
+
+    def _on_menu_confirm(self, confirmed: bool | None) -> None:
+        """Callback for the S-while-running confirmation modal."""
+        if confirmed:
+            self.app.pop_screen()
+        else:
+            self._notify("Returned to session")
 
     async def action_esckey(self) -> None:
         """Esc: prompt when a step is running; else exit."""

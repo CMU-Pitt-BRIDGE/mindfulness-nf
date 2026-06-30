@@ -20,6 +20,7 @@ from mindfulness_nf.orchestration.executor import (
 from mindfulness_nf.orchestration.layout import SubjectLayout
 from mindfulness_nf.orchestration.scanner_source import ScannerSource
 from mindfulness_nf.orchestration.subjects import (
+    clear_step_raw_volumes,
     rename_step_volumes,
     snapshot_img_dir,
 )
@@ -184,8 +185,13 @@ class NfRunStepExecutor:
             # estimates to disk; this gives the analyst per-TR motion +
             # framewise displacement.
             if renamed > 0:
+                # Surface post-step work: motion extraction can take ~10-40s,
+                # so without this the closed ball task looks like a stalled
+                # step sitting at 150/150.
+                on_progress(self._phase2_snapshot("extracting motion params"))
+                motion_tsv = None
                 try:
-                    await motion_mod.extract_motion_params(
+                    motion_tsv = await motion_mod.extract_motion_params(
                         img_dir=self._layout.img_dir,
                         output_dir=self._subject_dir / "derivatives" / "motion",
                         task=self._config.task,
@@ -195,6 +201,17 @@ class NfRunStepExecutor:
                     import logging as _logging
                     _logging.getLogger(__name__).exception(
                         "motion extraction raised for step %s", self._config.name
+                    )
+                # Once motion params are safely on disk, drop this run's raw
+                # feedback/transfer volumes: nothing downstream consumes them
+                # (only rest images feed Process) and the scanner keeps the
+                # full series. Guarded on motion SUCCESS so data is never lost
+                # if extraction failed; best-effort, never fails the step.
+                if motion_tsv is not None:
+                    clear_step_raw_volumes(
+                        self._layout.img_dir,
+                        self._config.task,
+                        self._config.run,
                     )
         return outcome
 

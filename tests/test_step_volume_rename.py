@@ -235,3 +235,34 @@ async def test_rest_and_nf_steps_with_same_run_do_not_collide(tmp_path: Path) ->
     # Content check: rest and transferpre were distinct payloads.
     assert (img_dir / "img-rest-01-00001.nii").read_bytes() == b"FAKE_rest"
     assert (img_dir / "img-transferpre-01-00001.nii").read_bytes() == b"FAKE_transferpre"
+
+
+def test_clear_step_raw_volumes_deletes_only_matching_task_run(tmp_path: Path) -> None:
+    """clear_step_raw_volumes removes one (task, run)'s raw volumes and leaves
+    every other run/task alone — the same task+run keying that protects Rest 1
+    from a feedback-run cleanup (the 2026-04-21 sub-morgan incident)."""
+    from mindfulness_nf.orchestration.subjects import clear_step_raw_volumes
+
+    img_dir = tmp_path / "img"
+    img_dir.mkdir()
+    # Target: feedback run 1 (3 volumes).
+    for v in range(1, 4):
+        (img_dir / f"img-feedback-01-{v:05d}.nii").write_bytes(b"X")
+    # Must survive: feedback run 2 and rest run 1 (Process needs rest).
+    (img_dir / "img-feedback-02-00001.nii").write_bytes(b"X")
+    (img_dir / "img-rest-01-00001.nii").write_bytes(b"X")
+
+    deleted = clear_step_raw_volumes(img_dir, "feedback", 1)
+
+    assert deleted == 3
+    assert sorted(p.name for p in img_dir.glob("img-*.nii")) == [
+        "img-feedback-02-00001.nii",
+        "img-rest-01-00001.nii",
+    ]
+
+
+def test_clear_step_raw_volumes_missing_dir_is_noop(tmp_path: Path) -> None:
+    """No img/ dir → returns 0 and raises nothing (best-effort cleanup)."""
+    from mindfulness_nf.orchestration.subjects import clear_step_raw_volumes
+
+    assert clear_step_raw_volumes(tmp_path / "nope", "feedback", 1) == 0

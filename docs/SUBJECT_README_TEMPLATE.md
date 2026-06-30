@@ -1,162 +1,99 @@
-# Subject data layout — REMIND mindfulness neurofeedback
+# Subject data: REMIND mindfulness neurofeedback
 
-This directory contains all data collected for one subject across one or
-more scanner sessions. It is **copy-and-go**: moving this directory to
-another machine gives downstream analysts everything they need, with the
-caveat that XML templates and masks reference code-defined semantics
-documented here.
+Everything collected for one subject across its scanner sessions. Self-contained:
+copy `sub-<ID>/` and you have all the data.
 
-## Directory layout
+## Layout
 
 ```
 sub-<ID>/
-├── sub-<ID>_sessions.tsv       One row per session (session_id, acq_time).
-├── sub-<ID>_participants.json  Subject-level metadata (optional).
-├── img/                        MURFI per-volume NIfTIs, task+run-keyed.
-├── xfm/                        study_ref + series*_ref (registration anchors).
-├── mask/                       DMN/CEN masks. mask/{dmn,cen}.nii is what
-│                               MURFI loaded for feedback.
-├── xml/                        Subject-level XML templates MURFI reads.
-├── log/                        Subject-level MURFI log (log.rtl).
-└── ses-<TYPE>/                 One per session: loc3, process, rt15, rt30.
-    ├── session_state.json      Authoritative step-by-step manifest.
-    ├── provenance.json         git SHA, host, CLI args at session start.
-    ├── log/                    Per-step MURFI logs (murfi_<xml>_<task>-<run>.log).
-    ├── rest/                   4D merges + FSL preprocessing.
-    ├── qc/                     QC overlays (slices GIFs).
+├── sub-<ID>_sessions.tsv   one row per session (session_id, acq_time)
+├── img/                    raw per-volume NIfTIs (see "Raw images")
+├── mask/                   DMN/CEN masks; dmn.nii and cen.nii drive feedback
+├── xfm/                    registration references (series*_ref, study_ref)
+├── xml/                    the MURFI configs used
+├── log/                    subject-level MURFI log
+└── ses-<TYPE>/             one per session: loc3, process, rt15, rt30
+    ├── session_state.json  the steps and their status
+    ├── provenance.json     code version, host, and command at session start
+    ├── log/                per-run MURFI logs
+    ├── rest/               (process only) merged rest 4D + ICA outputs
+    ├── qc/                 registration QC images
     └── sourcedata/
-        ├── murfi/xml/          Snapshot of XML templates as run.
-        └── psychopy/           Behavioral data.
-            └── sub-<ID>/       PsychoPy-written CSVs + BIDS TSVs (below).
+        ├── murfi/xml/      the XMLs as run
+        └── psychopy/sub-<ID>/   behavioral data (see "Behavioral data")
 ```
 
 ## Sessions
 
-| Session | Purpose | Typical steps |
+| Session | What it is | Steps |
 |---|---|---|
-| `ses-loc3` | Localizer: resting-state runs | Setup → Rest 1 → Rest 2 (each 250 TRs) |
-| `ses-process` | Offline processing: ICA + mask extraction + registration | Setup → Merge → MELODIC → Extract DMN → Extract CEN → Register → QC |
-| `ses-rt15` | Real-time NF, 15-min protocol | Setup → 2vol → Transfer Pre → Feedback 1-5 → Transfer Post (each 150 TRs) |
-| `ses-rt30` | Real-time NF, 30-min protocol | Same as rt15 with 2 more feedback runs and 2 transfer posts |
+| `ses-loc3` | Resting-state localizer | Setup, Rest 1, Rest 2 (250 TRs each) |
+| `ses-process` | Builds the DMN/CEN masks from the rest data | Setup, Merge, MELODIC, Extract DMN, Extract CEN, Register, QC |
+| `ses-rt15` | Real-time neurofeedback, 15 min | Setup, Transfer Pre, Feedback 1-5, Transfer Post (150 TRs each) |
+| `ses-rt30` | Real-time neurofeedback, 30 min | rt15 plus Feedback 6-10 and a second Transfer Post |
 
-TR is **1.2 seconds** across all sessions.
+TR is 1.2 s throughout.
 
-## Raw per-volume NIfTIs — `img/img-<task>-<run>-<vol>.nii`
+## Raw images: `img/img-<task>-<run>-<vol>.nii`
 
-MURFI writes the raw incoming scanner volumes here. Filename encodes:
-- `<task>`: BIDS task label (`rest`, `feedback`, `transferpre`, `transferpost`, `2vol`)
-- `<run>`: task-scoped 1-based run index, zero-padded to 2 digits
-- `<vol>`: 1-based volume index in this run, zero-padded to 5 digits
+One file per acquired volume. The name gives task, run, and volume:
+`img-feedback-03-00042.nii` is Feedback run 3, volume 42. Tasks are `rest`,
+`feedback`, `transferpre`, `transferpost`.
 
-Example: `img-feedback-03-00042.nii` = Feedback 3, volume 42.
+Rest images are kept (the masks are built from them). Feedback and transfer
+images are removed after motion extraction; the scanner holds the full series,
+and motion is in `ses-<TYPE>/derivatives/motion/`.
 
-> **Historical note:** earlier data used `img-<NNNNN>-<VVVVV>.nii` (MURFI's
-> native series+volume format). Migration to task-keyed naming landed
-> 2026-04-21; earlier subjects may retain the native format.
+## Behavioral data: `ses-<TYPE>/sourcedata/psychopy/sub-<ID>/`
 
-## Behavioral data — `ses-<TYPE>/sourcedata/psychopy/sub-<ID>/`
+Per neurofeedback run (Transfer Pre, each Feedback, Transfer Post):
 
-For each NF run (Transfer Pre, each Feedback, Transfer Post), PsychoPy
-writes five files:
+- **`..._roi_outputs.csv`**: the neurofeedback signal, one row per TR. Columns below.
+- **`..._ses-<TYPE>_task-<task>_run-<NN>.tsv`**: the same data as a BIDS events file, with the slider answers repeated on every row.
+- **`..._slider_questions.csv`**: the four post-run ratings (1-9).
+- **`..._DMN_<task>_<run>.csv` / `.psydat`**: PsychoPy run metadata.
+- **`..._DMN_<task>_<run>.log`**: PsychoPy event log, for timing.
 
-### `sub-<ID>_DMN_<task>_<run>.csv` + `.psydat`
-PsychoPy's `ExperimentHandler` main experiment log. Metadata row with
-participant/run/feedback_on/date/expName/TR/scale_factor/frameRate.
+### `roi_outputs.csv` columns
 
-### `sub-<ID>_DMN_<task>_<run>.log`
-Frame-by-frame text log of PsychoPy events (keypresses, stimulus onsets,
-all UI interactions). Useful for timing reconstruction.
+| Column | Meaning |
+|---|---|
+| `volume` | TR index, 0-based |
+| `scale_factor` | ball gain (signal to displacement); 10 by default |
+| `time` | seconds since the scanner trigger |
+| `time_plus_1.2` | predicted onset of the next volume |
+| `cen` | CEN activation from `mask/cen.nii`; positive above baseline, negative below |
+| `dmn` | DMN activation from `mask/dmn.nii`; lower DMN means more mindful |
+| `stage` | `baseline` (first ~25 TRs) or `feedback` |
+| `cen_cumulative_hits` / `dmn_cumulative_hits` | times the ball reached the CEN/DMN target this run |
+| `pda_outlier` | TR flagged as an outlier (cen minus dmn beyond threshold); `nan` in baseline |
+| `ball_y_position` | ball y, normalized [-1, 1]; `nan` in baseline |
+| `top_circle_y_position` / `bottom_circle_y_position` | DMN/CEN target y (0.333 / -0.333) |
 
-### `sub-<ID>_DMN_<task>_<run>_roi_outputs.csv`
-**Per-TR streaming ROI data from MURFI — the main NF signal.** One row
-per TR written by the PsychoPy feedback loop.
+A full run has 150 rows. A run that ended early (no activation arriving from
+MURFI) has fewer.
 
-Columns:
+The four slider questions:
+1. How often were you using the mental noting practice?
+2. How often did you check the position of the ball?
+3. How difficult was it to apply mental noting?
+4. How calm do you feel right now?
 
-| Column | Unit | Description |
-|---|---|---|
-| `volume` | TR index | 0-based (0 → 149 for a 150-TR run) |
-| `scale_factor` | dimensionless | Ball motion gain — maps ROI signal → ball displacement. Adaptive across runs: default 10, × 1.25 if too few hits, × 0.75 if too many |
-| `time` | seconds | PsychoPy clock time of this row's write, relative to scanner trigger |
-| `time_plus_1.2` | seconds | `time + TR`; predicted onset of NEXT volume |
-| `cen` | arbitrary MURFI units (z-scored relative to run-running-mean) | Central executive network mean activation from `mask/cen.nii` via `roi-weightedave`. Positive = above baseline, negative = below |
-| `dmn` | arbitrary MURFI units (z-scored) | Default mode network mean activation from `mask/dmn.nii`. In this protocol **lower DMN = more mindful** |
-| `stage` | enum | `baseline` (first ~25 TRs) or `feedback` (remaining TRs) |
-| `cen_cumulative_hits` | count | Times the ball reached the CEN target circle (bottom) this run |
-| `dmn_cumulative_hits` | count | Times the ball reached the DMN target circle (top) this run |
-| `pda_outlier` | bool or `nan` | True if this TR's PDA (= cen − dmn) exceeds `pda_outlier_threshold` (= 2) SDs. `nan` during baseline. Feedback display damps outliers |
-| `ball_y_position` | normalized [-1, 1] | Rendered ball y-coord. `nan` during baseline |
-| `top_circle_y_position` | normalized [-1, 1] | DMN target circle y-coord. Fixed at 0.333 |
-| `bottom_circle_y_position` | normalized [-1, 1] | CEN target circle y-coord. Fixed at −0.333 |
+## Masks: `mask/`
 
-> **Known off-by-one:** all NF runs write **149 data rows** for a
-> 150-TR scan (final TR is dropped as the PsychoPy routine timer expires
-> before the last volume is fully written). MURFI's own log confirms
-> 150 TRs were received. If row count matters for your analysis, use
-> MURFI's `curact-*.nii` files or the BIDS TSV (same length).
+`dmn.nii` and `cen.nii` are what MURFI loaded for feedback. The rest are
+intermediates: `*_rest_original` (raw MELODIC output in rest space),
+`*_studyref` (before erosion), `*_native_rest` (MELODIC copies).
 
-### `sub-<ID>_DMN_<task>_<run>_slider_questions.csv`
-Post-run self-report sliders (4 questions, 1-9 scale):
-1. "How often were you using the mental noting practice?"
-2. "How often did you check the position of the ball?"
-3. "How difficult was it to apply mental noting?"
-4. "How calm do you feel right now?"
+## Session record: `ses-<TYPE>/session_state.json`
 
-### `sub-<ID>_ses-<TYPE>_task-<task>_run-<NN>.tsv`
-BIDS-compliant events TSV. One row per TR. Duration = 1.2 s (one TR).
-Columns include onset/duration/trial_type + the same cen/dmn/pda + the
-4 slider responses broadcast across all rows.
+The steps and their status (`completed`, `failed`, ...), with start and finish
+times and any error. `provenance.json` records the code version and the command
+used to run the session.
 
-## Masks — `mask/`
-
-| File | Space | Source |
-|---|---|---|
-| `mask/dmn.nii` | study_ref | Final DMN mask MURFI loads for NF |
-| `mask/cen.nii` | study_ref | Final CEN mask MURFI loads for NF |
-| `mask/dmn_rest_original.nii` | native rest | Unregistered DMN from MELODIC |
-| `mask/cen_rest_original.nii` | native rest | Unregistered CEN from MELODIC |
-| `mask/dmn_studyref.nii`, `cen_studyref.nii` | study_ref | Intermediate (before erosion/masking) |
-| `mask/dmn_native_rest.nii`, `cen_native_rest.nii` | native rest | Copy of the MELODIC outputs |
-
-Only `mask/dmn.nii` + `mask/cen.nii` are consumed at scan time.
-
-## MURFI XML templates
-
-Each session snapshots the XMLs at `ses-<TYPE>/sourcedata/murfi/xml/`.
-These are the exact configs MURFI read during the session. They define:
-
-- `<scanner>`: TR, number of measurements, port, `save`/`saveImages`
-  (both must be `true` to write raw volumes to disk)
-- `<processor>`: per-TR pipeline (mosaic → mask-load → motion → GLM
-  → roi-combine → current-activation → infoserver stream)
-
-## Provenance — `ses-<TYPE>/provenance.json`
-
-Written at session start. Fields:
-- `timestamp`: ISO-8601 UTC
-- `git_sha`, `git_branch`, `git_dirty`: code version
-- `hostname`, `platform`, `python`: execution environment
-- `cli_argv`: exact CLI invocation
-
-## Session state — `ses-<TYPE>/session_state.json`
-
-Authoritative record of step progression. Atomic writes; safe to read
-while the session is live. Key fields:
-- `subject`, `session_type`, `cursor`, `created_at`, `updated_at`
-- `steps[]`: each with `config` (name, task, run, target), `status`
-  (`pending`/`running`/`completed`/`failed`), `progress_current`,
-  `last_started`, `last_finished`, `attempts`, `artifacts`, `error`
-
-A `status=running` on resume is coerced to `failed` with `error =
-"interrupted by restart"`.
-
-## Copying for analysis
+## Copying
 
 ```bash
 cp -r /path/to/sub-<ID>/ /destination/
 ```
-
-Everything needed is under `sub-<ID>/`. PsychoPy behavioral data used to
-live at `psychopy/balltask/data/sub-<ID>/` (sibling tree, easy to miss);
-the pipeline now routes it into `ses-<TYPE>/sourcedata/psychopy/` so
-nothing is outside the subject dir.

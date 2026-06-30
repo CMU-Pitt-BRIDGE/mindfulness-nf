@@ -691,6 +691,43 @@ try:
 except Exception:
     pass
 
+# ---- Focus-independent keyboard for the scanner trigger -------------------
+# pyglet's event.getKeys() only sees keys when the window holds OS focus (the
+# exact problem activate() above tries to paper over). iohub instead reads the
+# keyboard at the OS device level and reports keys "regardless of whether the
+# window has focus or not" (PsychoPy docs), so a scanner trigger lands even
+# when the operator's TUI terminal still has focus.
+#
+# FAIL-SAFE: if iohub can't start, _iohub_kb stays None and _read_all_keys()
+# falls back to event.getKeys() — i.e. exactly the previous behavior. This can
+# only help, never break the run. The raw key stream is still logged to
+# trigger_debug.log, so you can see what iohub actually reports for your
+# scanner's trigger and adjust the filter if needed.
+_iohub_kb = None
+try:
+    from psychopy.hardware import keyboard as _kbmod
+    try:
+        from psychopy.iohub.client import ioHubConnection
+        if ioHubConnection.ACTIVE_CONNECTION is None:
+            from psychopy.iohub import launchHubServer
+            launchHubServer(window=win)
+    except Exception:
+        pass  # a server may already be running, or iohub unavailable
+    _iohub_kb = _kbmod.Keyboard(backend='iohub')
+except Exception:
+    _iohub_kb = None
+
+
+def _read_all_keys():
+    """Key names seen since the last call. Focus-independent via iohub when
+    available, else the pyglet window queue (event.getKeys), unchanged."""
+    if _iohub_kb is not None:
+        try:
+            return [k.name for k in _iohub_kb.getKeys(waitRelease=False)]
+        except Exception:
+            pass  # any iohub hiccup → fall back to the window queue
+    return event.getKeys()
+
 #------Prepare to start Routine "trigger"-------
 t = 0
 triggerClock.reset()  # clock 
@@ -730,6 +767,11 @@ while continueRoutine:
         # keyboard checking is just starting
         key_resp_3.clock.reset()  # now t=0
         event.clearEvents(eventType='keyboard')
+        if _iohub_kb is not None:
+            try:
+                _iohub_kb.clearEvents()
+            except Exception:
+                pass
     if key_resp_3.status == STARTED:
         # Grab ALL keys — not a filtered keyList — so we can (a) see
         # whether the window is actually receiving keyboard input and
@@ -737,7 +779,7 @@ while continueRoutine:
         # than the legacy ['t','+','5'] list. Every key seen is appended
         # to a debug log next to the run's data files (the TUI pipes
         # psychopy stdout, so prints would be invisible).
-        _all_keys = event.getKeys()
+        _all_keys = _read_all_keys()
         if _all_keys:
             try:
                 with open(os.path.join(_participant_dir, 'trigger_debug.log'), 'a') as _df:

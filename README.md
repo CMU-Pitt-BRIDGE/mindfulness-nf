@@ -119,7 +119,8 @@ The help bar shows only keys valid for the current step status. Cursor navigatio
 | `g` | any | Prompt for step number; jump cursor |
 | `m` | status=running, `murfi` in components | Relaunch MURFI; keep data and progress |
 | `p` | status=running, `psychopy` in components | Relaunch PsychoPy; keep data and progress |
-| `esc` | any | Quit; prompts before stopping a running step |
+| `s` | any | Return to the session menu (1/2/3/4); prompts before stopping a running step |
+| `esc` | any | Quit the app; prompts before stopping a running step |
 
 `r` destroys on-disk data for the step. `m` and `p` keep data; they restart one subprocess.
 

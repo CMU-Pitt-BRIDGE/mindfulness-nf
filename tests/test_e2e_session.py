@@ -897,6 +897,65 @@ class TestKeybindings:
         assert runner.state.steps[3].status is StepStatus.FAILED
         assert (runner.state.steps[3].error or "").lower() == "cancelled"
 
+    @pytest.mark.asyncio
+    async def test_s_key_returns_to_menu_when_idle(
+        self,
+        tmp_path: Path,
+        fresh_state: Any,
+        pipeline_config_test: Any,
+        scanner_config_test: Any,
+    ) -> None:
+        """'s' on an idle session pops back toward the session-select menu."""
+        from mindfulness_nf.tui.screens.session import SessionScreen
+
+        runner = _make_runner(
+            tmp_path,
+            fresh_state,
+            pipeline_config_test,
+            scanner_config_test,
+            cursor=1,
+        )
+        app = _SessionScreenApp(runner)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert isinstance(app.screen, SessionScreen)
+            await pilot.press("s")
+            await pilot.pause()
+            assert not isinstance(app.screen, SessionScreen)
+
+    @pytest.mark.asyncio
+    async def test_s_key_confirms_before_leaving_a_running_step(
+        self,
+        tmp_path: Path,
+        fresh_state: Any,
+        pipeline_config_test: Any,
+        scanner_config_test: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """'s' while a step runs prompts; N keeps you on the session screen."""
+        from mindfulness_nf.tui.screens.session import SessionScreen, _ConfirmModal
+
+        runner = _make_runner(
+            tmp_path,
+            fresh_state,
+            pipeline_config_test,
+            scanner_config_test,
+            cursor=2,
+        )
+        fake = FakeStepExecutor(components=("murfi",))
+        _install_fake(monkeypatch, runner, fake)
+        app = _SessionScreenApp(runner)
+        async with app.run_test() as pilot:
+            await pilot.press("d")
+            await pilot.pause()
+            await _wait_running(runner)
+            await pilot.press("s")
+            await pilot.pause()
+            assert isinstance(app.screen, _ConfirmModal)
+            await pilot.press("n")
+            await pilot.pause()
+            assert isinstance(app.screen, SessionScreen)
+
 
 # ---------------------------------------------------------------------------
 # TestStateInvariants

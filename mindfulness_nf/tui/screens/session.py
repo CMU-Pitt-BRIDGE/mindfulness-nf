@@ -138,6 +138,7 @@ class SessionScreen(Screen[None]):
         Binding("g", "gkey", "Go to", show=False),
         Binding("m", "mkey", "Relaunch MURFI", show=True),
         Binding("p", "pkey", "Relaunch PsychoPy", show=True),
+        Binding("s", "skey", "Menu", show=True),
         Binding("escape", "esckey", "Quit", show=True),
     ]
 
@@ -351,6 +352,7 @@ class SessionScreen(Screen[None]):
                 )
 
         parts.append("[b/n] Navigate")
+        parts.append("[s] Menu")
         parts.append("[esc] Quit")
         return "  ".join(parts)
 
@@ -468,6 +470,27 @@ class SessionScreen(Screen[None]):
             self._notify(f"{component.upper()} not applicable to this step")
             return
         await self._runner.relaunch_component(component)
+
+    async def action_skey(self) -> None:
+        """S: return to the session-select menu (the 1/2/3/4 screen).
+
+        Pops this screen. Confirms first if a step is running, since leaving
+        stops the current run (``on_unmount`` calls ``stop_current``).
+        """
+        if self._runner.state.running_index is not None:
+            self.app.push_screen(
+                _ConfirmModal("Stop current run and return to the menu? [Y/N]"),
+                callback=self._on_menu_confirm,
+            )
+            return
+        self.app.pop_screen()
+
+    def _on_menu_confirm(self, confirmed: bool | None) -> None:
+        """Callback for the S-while-running confirmation modal."""
+        if confirmed:
+            self.app.pop_screen()
+        else:
+            self._notify("Returned to session")
 
     async def action_esckey(self) -> None:
         """Esc: prompt when a step is running; else exit."""

@@ -18,6 +18,7 @@ from mindfulness_nf.orchestration.preflight import (
     check_apptainer_installed,
     check_container_exists,
     check_ethernet_interface,
+    check_nf_masks,
     check_firewall_port_4006,
     check_firewall_port_50000,
     check_fsl_on_path,
@@ -40,14 +41,23 @@ from mindfulness_nf.orchestration.preflight import (
 
 class TestCheckFslOnPath:
     def test_pass(self) -> None:
-        with patch("mindfulness_nf.orchestration.preflight.shutil.which", return_value="/opt/fsl/bin/flirt"):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.shutil.which",
+            return_value="/opt/fsl/bin/flirt",
+        ):
             result = asyncio.run(check_fsl_on_path())
-        assert result == CheckResult(name="FSL on PATH", passed=True, message="flirt found")
+        assert result == CheckResult(
+            name="FSL on PATH", passed=True, message="flirt found"
+        )
 
     def test_fail(self) -> None:
-        with patch("mindfulness_nf.orchestration.preflight.shutil.which", return_value=None):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.shutil.which", return_value=None
+        ):
             result = asyncio.run(check_fsl_on_path())
-        assert result == CheckResult(name="FSL on PATH", passed=False, message="FSL not on PATH")
+        assert result == CheckResult(
+            name="FSL on PATH", passed=False, message="FSL not on PATH"
+        )
 
 
 class TestCheckVsendOnPath:
@@ -67,12 +77,17 @@ class TestCheckVsendOnPath:
 
 class TestCheckApptainerInstalled:
     def test_pass(self) -> None:
-        with patch("mindfulness_nf.orchestration.preflight.shutil.which", return_value="/usr/bin/apptainer"):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.shutil.which",
+            return_value="/usr/bin/apptainer",
+        ):
             result = asyncio.run(check_apptainer_installed())
         assert result.passed is True
 
     def test_fail(self) -> None:
-        with patch("mindfulness_nf.orchestration.preflight.shutil.which", return_value=None):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.shutil.which", return_value=None
+        ):
             result = asyncio.run(check_apptainer_installed())
         assert result.passed is False
 
@@ -121,14 +136,18 @@ class TestCheckSubjectDirectory:
 # ---------------------------------------------------------------------------
 
 
-def _mock_subprocess_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+def _mock_subprocess_run(
+    args: list[str], **kwargs: object
+) -> subprocess.CompletedProcess[str]:
     """Default mock that returns empty output."""
     return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
 
 class TestCheckEthernetInterface:
     def test_pass(self) -> None:
-        def mock_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        def mock_run(
+            args: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
             return subprocess.CompletedProcess(
                 args=args,
                 returncode=0,
@@ -136,12 +155,18 @@ class TestCheckEthernetInterface:
                 stderr="",
             )
 
-        with patch("mindfulness_nf.orchestration.preflight.subprocess.run", side_effect=mock_run):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.subprocess.run",
+            side_effect=mock_run,
+        ):
             result = asyncio.run(check_ethernet_interface())
         assert result.passed is True
 
     def test_fail(self) -> None:
-        with patch("mindfulness_nf.orchestration.preflight.subprocess.run", side_effect=_mock_subprocess_run):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.subprocess.run",
+            side_effect=_mock_subprocess_run,
+        ):
             result = asyncio.run(check_ethernet_interface())
         assert result.passed is False
 
@@ -153,26 +178,45 @@ class TestCheckEthernetInterface:
 
 class TestCheckScannerReachable:
     def test_pass(self) -> None:
-        def mock_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-            return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+        def mock_run(
+            args: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                args=args, returncode=0, stdout="", stderr=""
+            )
 
-        with patch("mindfulness_nf.orchestration.preflight.subprocess.run", side_effect=mock_run):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.subprocess.run",
+            side_effect=mock_run,
+        ):
             result = asyncio.run(check_scanner_reachable("192.168.2.1"))
         assert result.passed is True
 
     def test_fail(self) -> None:
-        def mock_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-            return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="")
+        def mock_run(
+            args: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                args=args, returncode=1, stdout="", stderr=""
+            )
 
-        with patch("mindfulness_nf.orchestration.preflight.subprocess.run", side_effect=mock_run):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.subprocess.run",
+            side_effect=mock_run,
+        ):
             result = asyncio.run(check_scanner_reachable("192.168.2.1"))
         assert result.passed is False
 
     def test_timeout(self) -> None:
-        def mock_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        def mock_run(
+            args: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
             raise subprocess.TimeoutExpired(cmd=args, timeout=5)
 
-        with patch("mindfulness_nf.orchestration.preflight.subprocess.run", side_effect=mock_run):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.subprocess.run",
+            side_effect=mock_run,
+        ):
             result = asyncio.run(check_scanner_reachable("192.168.2.1"))
         assert result.passed is False
 
@@ -184,7 +228,9 @@ class TestCheckScannerReachable:
 
 class TestCheckWifiOff:
     def test_pass_no_wireless(self) -> None:
-        def mock_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        def mock_run(
+            args: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
             return subprocess.CompletedProcess(
                 args=args,
                 returncode=0,
@@ -192,12 +238,17 @@ class TestCheckWifiOff:
                 stderr="",
             )
 
-        with patch("mindfulness_nf.orchestration.preflight.subprocess.run", side_effect=mock_run):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.subprocess.run",
+            side_effect=mock_run,
+        ):
             result = asyncio.run(check_wifi_off())
         assert result.passed is True
 
     def test_fail_wifi_active(self) -> None:
-        def mock_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        def mock_run(
+            args: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
             return subprocess.CompletedProcess(
                 args=args,
                 returncode=0,
@@ -205,12 +256,17 @@ class TestCheckWifiOff:
                 stderr="",
             )
 
-        with patch("mindfulness_nf.orchestration.preflight.subprocess.run", side_effect=mock_run):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.subprocess.run",
+            side_effect=mock_run,
+        ):
             result = asyncio.run(check_wifi_off())
         assert result.passed is False
 
     def test_pass_wifi_no_ip(self) -> None:
-        def mock_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        def mock_run(
+            args: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
             return subprocess.CompletedProcess(
                 args=args,
                 returncode=0,
@@ -218,7 +274,10 @@ class TestCheckWifiOff:
                 stderr="",
             )
 
-        with patch("mindfulness_nf.orchestration.preflight.subprocess.run", side_effect=mock_run):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.subprocess.run",
+            side_effect=mock_run,
+        ):
             result = asyncio.run(check_wifi_off())
         assert result.passed is True
 
@@ -230,15 +289,24 @@ class TestCheckWifiOff:
 
 class TestCheckPortFree:
     def test_port_50000_free(self) -> None:
-        def mock_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-            return subprocess.CompletedProcess(args=args, returncode=0, stdout="LISTEN 0 128 *:22 *:*\n", stderr="")
+        def mock_run(
+            args: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                args=args, returncode=0, stdout="LISTEN 0 128 *:22 *:*\n", stderr=""
+            )
 
-        with patch("mindfulness_nf.orchestration.preflight.subprocess.run", side_effect=mock_run):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.subprocess.run",
+            side_effect=mock_run,
+        ):
             result = asyncio.run(check_port_50000_free())
         assert result.passed is True
 
     def test_port_50000_in_use(self) -> None:
-        def mock_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        def mock_run(
+            args: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
             return subprocess.CompletedProcess(
                 args=args,
                 returncode=0,
@@ -246,17 +314,25 @@ class TestCheckPortFree:
                 stderr="",
             )
 
-        with patch("mindfulness_nf.orchestration.preflight.subprocess.run", side_effect=mock_run):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.subprocess.run",
+            side_effect=mock_run,
+        ):
             result = asyncio.run(check_port_50000_free())
         assert result.passed is False
 
     def test_port_15001_free(self) -> None:
-        with patch("mindfulness_nf.orchestration.preflight.subprocess.run", side_effect=_mock_subprocess_run):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.subprocess.run",
+            side_effect=_mock_subprocess_run,
+        ):
             result = asyncio.run(check_port_15001_free())
         assert result.passed is True
 
     def test_port_15001_in_use(self) -> None:
-        def mock_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        def mock_run(
+            args: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
             return subprocess.CompletedProcess(
                 args=args,
                 returncode=0,
@@ -264,7 +340,10 @@ class TestCheckPortFree:
                 stderr="",
             )
 
-        with patch("mindfulness_nf.orchestration.preflight.subprocess.run", side_effect=mock_run):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.subprocess.run",
+            side_effect=mock_run,
+        ):
             result = asyncio.run(check_port_15001_free())
         assert result.passed is False
 
@@ -276,12 +355,16 @@ class TestCheckPortFree:
 
 class TestCheckPort50000CanBind:
     def test_pass(self) -> None:
-        with patch("mindfulness_nf.orchestration.preflight._try_bind_port", return_value=True):
+        with patch(
+            "mindfulness_nf.orchestration.preflight._try_bind_port", return_value=True
+        ):
             result = asyncio.run(check_port_50000_can_bind())
         assert result.passed is True
 
     def test_fail(self) -> None:
-        with patch("mindfulness_nf.orchestration.preflight._try_bind_port", return_value=False):
+        with patch(
+            "mindfulness_nf.orchestration.preflight._try_bind_port", return_value=False
+        ):
             result = asyncio.run(check_port_50000_can_bind())
         assert result.passed is False
 
@@ -293,7 +376,9 @@ class TestCheckPort50000CanBind:
 
 class TestFirewallChecks:
     def test_port_50000_allowed(self) -> None:
-        def mock_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        def mock_run(
+            args: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
             return subprocess.CompletedProcess(
                 args=args,
                 returncode=0,
@@ -301,12 +386,17 @@ class TestFirewallChecks:
                 stderr="",
             )
 
-        with patch("mindfulness_nf.orchestration.preflight.subprocess.run", side_effect=mock_run):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.subprocess.run",
+            side_effect=mock_run,
+        ):
             result = asyncio.run(check_firewall_port_50000())
         assert result.passed is True
 
     def test_port_50000_blocked(self) -> None:
-        def mock_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        def mock_run(
+            args: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
             return subprocess.CompletedProcess(
                 args=args,
                 returncode=0,
@@ -314,21 +404,33 @@ class TestFirewallChecks:
                 stderr="",
             )
 
-        with patch("mindfulness_nf.orchestration.preflight.subprocess.run", side_effect=mock_run):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.subprocess.run",
+            side_effect=mock_run,
+        ):
             result = asyncio.run(check_firewall_port_50000())
         assert result.passed is False
 
     def test_nft_not_available(self) -> None:
-        def mock_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-            return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="")
+        def mock_run(
+            args: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                args=args, returncode=1, stdout="", stderr=""
+            )
 
-        with patch("mindfulness_nf.orchestration.preflight.subprocess.run", side_effect=mock_run):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.subprocess.run",
+            side_effect=mock_run,
+        ):
             result = asyncio.run(check_firewall_port_50000())
         assert result.passed is True
         assert "skipping" in result.message
 
     def test_port_4006_allowed(self) -> None:
-        def mock_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        def mock_run(
+            args: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
             return subprocess.CompletedProcess(
                 args=args,
                 returncode=0,
@@ -336,12 +438,17 @@ class TestFirewallChecks:
                 stderr="",
             )
 
-        with patch("mindfulness_nf.orchestration.preflight.subprocess.run", side_effect=mock_run):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.subprocess.run",
+            side_effect=mock_run,
+        ):
             result = asyncio.run(check_firewall_port_4006())
         assert result.passed is True
 
     def test_port_4006_blocked(self) -> None:
-        def mock_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        def mock_run(
+            args: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
             return subprocess.CompletedProcess(
                 args=args,
                 returncode=0,
@@ -349,15 +456,23 @@ class TestFirewallChecks:
                 stderr="",
             )
 
-        with patch("mindfulness_nf.orchestration.preflight.subprocess.run", side_effect=mock_run):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.subprocess.run",
+            side_effect=mock_run,
+        ):
             result = asyncio.run(check_firewall_port_4006())
         assert result.passed is False
 
     def test_nft_command_missing(self) -> None:
-        def mock_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        def mock_run(
+            args: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
             raise FileNotFoundError("nft not found")
 
-        with patch("mindfulness_nf.orchestration.preflight.subprocess.run", side_effect=mock_run):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.subprocess.run",
+            side_effect=mock_run,
+        ):
             result = asyncio.run(check_firewall_port_50000())
         assert result.passed is True
         assert "skipped" in result.message
@@ -370,26 +485,36 @@ class TestFirewallChecks:
 
 class TestCheckStaleMurfiProcesses:
     def test_no_stale(self) -> None:
-        with patch("mindfulness_nf.orchestration.preflight.subprocess.run", side_effect=_mock_subprocess_run):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.subprocess.run",
+            side_effect=_mock_subprocess_run,
+        ):
             result = asyncio.run(check_stale_murfi_processes())
         assert result.passed is True
 
     def test_stale_on_50000(self) -> None:
-        def mock_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        def mock_run(
+            args: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
             return subprocess.CompletedProcess(
                 args=args,
                 returncode=0,
-                stdout="LISTEN 0 128 *:50000 *:* users:((\"murfi\",pid=1234,fd=5))\n",
+                stdout='LISTEN 0 128 *:50000 *:* users:(("murfi",pid=1234,fd=5))\n',
                 stderr="",
             )
 
-        with patch("mindfulness_nf.orchestration.preflight.subprocess.run", side_effect=mock_run):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.subprocess.run",
+            side_effect=mock_run,
+        ):
             result = asyncio.run(check_stale_murfi_processes())
         assert result.passed is False
         assert "50000" in result.message
 
     def test_stale_on_both_ports(self) -> None:
-        def mock_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        def mock_run(
+            args: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
             return subprocess.CompletedProcess(
                 args=args,
                 returncode=0,
@@ -397,7 +522,10 @@ class TestCheckStaleMurfiProcesses:
                 stderr="",
             )
 
-        with patch("mindfulness_nf.orchestration.preflight.subprocess.run", side_effect=mock_run):
+        with patch(
+            "mindfulness_nf.orchestration.preflight.subprocess.run",
+            side_effect=mock_run,
+        ):
             result = asyncio.run(check_stale_murfi_processes())
         assert result.passed is False
         assert "50000" in result.message
@@ -417,9 +545,18 @@ class TestRunPreflight:
         config = ScannerConfig(murfi_container=str(container))
 
         with (
-            patch("mindfulness_nf.orchestration.preflight.shutil.which", return_value="/usr/bin/stub"),
-            patch("mindfulness_nf.orchestration.preflight.subprocess.run", side_effect=_mock_subprocess_run),
-            patch("mindfulness_nf.orchestration.preflight._try_bind_port", return_value=True),
+            patch(
+                "mindfulness_nf.orchestration.preflight.shutil.which",
+                return_value="/usr/bin/stub",
+            ),
+            patch(
+                "mindfulness_nf.orchestration.preflight.subprocess.run",
+                side_effect=_mock_subprocess_run,
+            ),
+            patch(
+                "mindfulness_nf.orchestration.preflight._try_bind_port",
+                return_value=True,
+            ),
         ):
             results = asyncio.run(run_preflight(config, subject_dir=None))
 
@@ -434,7 +571,9 @@ class TestRunPreflight:
         container.touch()
         config = ScannerConfig(murfi_container=str(container))
 
-        def mock_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        def mock_run(
+            args: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
             cmd = args[0] if args else ""
             if cmd == "ip":
                 return subprocess.CompletedProcess(
@@ -444,18 +583,35 @@ class TestRunPreflight:
                     stderr="",
                 )
             if cmd == "ping":
-                return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+                return subprocess.CompletedProcess(
+                    args=args, returncode=0, stdout="", stderr=""
+                )
             if cmd == "ss":
-                return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+                return subprocess.CompletedProcess(
+                    args=args, returncode=0, stdout="", stderr=""
+                )
             if cmd == "sudo":
                 # nft — return empty/failure so firewall check skips
-                return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="")
-            return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+                return subprocess.CompletedProcess(
+                    args=args, returncode=1, stdout="", stderr=""
+                )
+            return subprocess.CompletedProcess(
+                args=args, returncode=0, stdout="", stderr=""
+            )
 
         with (
-            patch("mindfulness_nf.orchestration.preflight.shutil.which", return_value="/usr/bin/stub"),
-            patch("mindfulness_nf.orchestration.preflight.subprocess.run", side_effect=mock_run),
-            patch("mindfulness_nf.orchestration.preflight._try_bind_port", return_value=True),
+            patch(
+                "mindfulness_nf.orchestration.preflight.shutil.which",
+                return_value="/usr/bin/stub",
+            ),
+            patch(
+                "mindfulness_nf.orchestration.preflight.subprocess.run",
+                side_effect=mock_run,
+            ),
+            patch(
+                "mindfulness_nf.orchestration.preflight._try_bind_port",
+                return_value=True,
+            ),
         ):
             results = asyncio.run(run_preflight(config, subject_dir=None))
 
@@ -469,11 +625,70 @@ class TestRunPreflight:
         missing_dir = tmp_path / "sub-99"
 
         with (
-            patch("mindfulness_nf.orchestration.preflight.shutil.which", return_value="/usr/bin/stub"),
-            patch("mindfulness_nf.orchestration.preflight.subprocess.run", side_effect=_mock_subprocess_run),
-            patch("mindfulness_nf.orchestration.preflight._try_bind_port", return_value=True),
+            patch(
+                "mindfulness_nf.orchestration.preflight.shutil.which",
+                return_value="/usr/bin/stub",
+            ),
+            patch(
+                "mindfulness_nf.orchestration.preflight.subprocess.run",
+                side_effect=_mock_subprocess_run,
+            ),
+            patch(
+                "mindfulness_nf.orchestration.preflight._try_bind_port",
+                return_value=True,
+            ),
         ):
             results = asyncio.run(run_preflight(config, subject_dir=missing_dir))
 
         subject_check = [r for r in results if r.name == "Subject directory"][0]
         assert subject_check.passed is False
+
+
+# ---------------------------------------------------------------------------
+# DMN/CEN masks (RT15/RT30 only)
+# ---------------------------------------------------------------------------
+
+
+class TestNfMasks:
+    def test_fails_when_masks_missing(self, tmp_path: Path) -> None:
+        (tmp_path / "mask").mkdir()
+        (tmp_path / "mask" / "dmn.nii").touch()
+        result = asyncio.run(check_nf_masks(tmp_path / "mask"))
+        assert result.passed is False
+        assert "missing cen" in result.message
+
+    def test_passes_with_nii_and_niigz(self, tmp_path: Path) -> None:
+        (tmp_path / "mask").mkdir()
+        (tmp_path / "mask" / "dmn.nii").touch()
+        (tmp_path / "mask" / "cen.nii.gz").touch()
+        assert asyncio.run(check_nf_masks(tmp_path / "mask")).passed is True
+
+    @pytest.mark.parametrize(
+        ("session", "expected"), [("ses-rt15", 15), ("ses-rt30", 15), ("ses-loc3", 14)]
+    )
+    def test_mask_check_runs_only_for_nf_sessions(
+        self, tmp_path: Path, session: str, expected: int
+    ) -> None:
+        container = tmp_path / "murfi.sif"
+        container.touch()
+        session_dir = tmp_path / "sub-001" / session
+        session_dir.mkdir(parents=True)
+        config = ScannerConfig(murfi_container=str(container))
+        with (
+            patch(
+                "mindfulness_nf.orchestration.preflight.shutil.which",
+                return_value="/usr/bin/stub",
+            ),
+            patch(
+                "mindfulness_nf.orchestration.preflight.subprocess.run",
+                side_effect=_mock_subprocess_run,
+            ),
+            patch(
+                "mindfulness_nf.orchestration.preflight._try_bind_port",
+                return_value=True,
+            ),
+        ):
+            results = asyncio.run(run_preflight(config, subject_dir=session_dir))
+        assert len(results) == expected
+        mask = [r for r in results if r.name == "DMN/CEN masks"]
+        assert [r.passed for r in mask] == ([False] if expected == 15 else [])

@@ -116,6 +116,7 @@ class VsendStepExecutor:
                     )
                 except Exception:  # noqa: BLE001 — diagnostic only
                     import logging as _logging
+
                     _logging.getLogger(__name__).exception(
                         "motion extraction raised for step %s", self._config.name
                     )
@@ -128,6 +129,7 @@ class VsendStepExecutor:
                 # Don't fail the step (volumes may have been processed in
                 # memory and the NF run still completed), but log prominently.
                 import logging as _logging
+
                 _logging.getLogger(__name__).warning(
                     "MURFI saved %d raw img files for step %s "
                     "(task=%s run=%s, target=%d) — raw volumes may be "
@@ -152,7 +154,7 @@ class VsendStepExecutor:
                 await murfi_mod.stop(self._murfi)
                 self._murfi = None
             await self._start_murfi()
-            # ``murfi.start`` truncates the log; reset baseline so the
+            # ``murfi.start`` starts an empty log; reset baseline so the
             # monitor reads the fresh log from byte 0. Saving the old
             # file size would starve the monitor until the new log grew
             # past it.
@@ -198,7 +200,9 @@ class VsendStepExecutor:
             assert murfi is not None
 
             # Read any new bytes from the log past our current baseline.
-            new_text = await asyncio.to_thread(_read_from, murfi.log_path, self._log_baseline)
+            new_text = await asyncio.to_thread(
+                _read_from, murfi.log_path, self._log_baseline
+            )
             if new_text:
                 self._log_baseline += len(new_text.encode())
                 for line in new_text.splitlines():

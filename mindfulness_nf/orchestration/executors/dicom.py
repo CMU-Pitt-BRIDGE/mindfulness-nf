@@ -131,7 +131,7 @@ class DicomStepExecutor:
                     await murfi_mod.stop(self._murfi)
                     self._murfi = None
                 await self._start_murfi()
-                # ``murfi.start`` truncates the log; reset baseline so the
+                # ``murfi.start`` starts an empty log; reset baseline so the
                 # monitor reads the fresh log from byte 0.
                 self._log_baseline = 0
         elif component == "dicom":
@@ -188,7 +188,9 @@ class DicomStepExecutor:
             murfi = self._murfi
             assert murfi is not None
 
-            new_text = await asyncio.to_thread(_read_from, murfi.log_path, self._log_baseline)
+            new_text = await asyncio.to_thread(
+                _read_from, murfi.log_path, self._log_baseline
+            )
             if new_text:
                 self._log_baseline += len(new_text.encode())
                 fatal_line: str | None = None
@@ -225,9 +227,7 @@ class DicomStepExecutor:
                     and loop.time() - push_done_at >= _POST_PUSH_GRACE_SECONDS
                 ):
                     await self._shutdown()
-                    return StepOutcome(
-                        succeeded=True, final_progress=self._snapshot()
-                    )
+                    return StepOutcome(succeeded=True, final_progress=self._snapshot())
 
             if murfi.process.returncode is not None:
                 rc = murfi.process.returncode

@@ -13,6 +13,7 @@ import re
 import signal
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from mindfulness_nf.config import PipelineConfig, ScannerConfig
@@ -74,7 +75,7 @@ async def start(
         one session (e.g. Transfer Pre + Feedback 1-5 + Transfer Post all
         using ``rtdmn.xml``) should pass a step-unique label like
         ``"rtdmn_feedback-02"`` so each step's log is preserved. Without
-        this, every MURFI restart truncates the shared ``murfi_rtdmn.log``
+        this, every MURFI restart replaces the shared ``murfi_rtdmn.log``
         and only the last step's log survives (regression lost sub-morgan's
         first six rt15 step logs, 2026-04-21).
 
@@ -100,9 +101,11 @@ async def start(
     log_dir.mkdir(parents=True, exist_ok=True)
     label = log_name if log_name else xml_name.removesuffix(".xml")
     log_path = log_dir / f"murfi_{label}.log"
-    # Truncate any previous log (same step re-run gets a clean slate;
-    # different steps pass a unique ``log_name`` so they don't clobber).
-    log_path.write_bytes(b"")
+    # A re-run of the same step starts a fresh log; the previous attempt's
+    # log is kept beside it as ``murfi_<label>.prev-<UTC time>.log``.
+    if log_path.exists() and log_path.stat().st_size > 0:
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        log_path.rename(log_dir / f"murfi_{label}.prev-{stamp}.log")
 
     # Build the Apptainer command, mirroring run_session.sh's run_murfi().
     cmd: list[str] = [
@@ -110,17 +113,26 @@ async def start(
         "exec",
         "--nv",
         "--cleanenv",
-        "--env", f"DISPLAY={os.environ.get('DISPLAY', ':0')}",
-        "--env", f"XDG_RUNTIME_DIR=/tmp/runtime-{os.getuid()}",
-        "--env", "QT_QPA_PLATFORM=xcb",
-        "--env", "NO_AT_BRIDGE=1",
-        "--env", "QT_LOGGING_RULES=*.debug=false;*.warning=false",
-        "--env", f"MURFI_SUBJECTS_DIR={subjects_dir}/",
-        "--env", f"MURFI_SUBJECT_NAME={subject_name}",
-        "--bind", f"{subjects_dir}:{subjects_dir}",
+        "--env",
+        f"DISPLAY={os.environ.get('DISPLAY', ':0')}",
+        "--env",
+        f"XDG_RUNTIME_DIR=/tmp/runtime-{os.getuid()}",
+        "--env",
+        "QT_QPA_PLATFORM=xcb",
+        "--env",
+        "NO_AT_BRIDGE=1",
+        "--env",
+        "QT_LOGGING_RULES=*.debug=false;*.warning=false",
+        "--env",
+        f"MURFI_SUBJECTS_DIR={subjects_dir}/",
+        "--env",
+        f"MURFI_SUBJECT_NAME={subject_name}",
+        "--bind",
+        f"{subjects_dir}:{subjects_dir}",
         sc.murfi_container,
         "murfi",
-        "-f", str(xml_path),
+        "-f",
+        str(xml_path),
     ]
 
     log_fh = log_path.open("w")

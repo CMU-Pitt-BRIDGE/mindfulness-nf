@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindfulness_nf.config import PipelineConfig, ScannerConfig
+from mindfulness_nf.config import PipelineConfig
 from mindfulness_nf.models import Color, TrafficLight
 from mindfulness_nf.orchestration.murfi import (
     MurfiProcess,
@@ -71,9 +71,7 @@ class TestStart:
             "mindfulness_nf.orchestration.murfi.asyncio.create_subprocess_exec",
             return_value=fake_proc,
         ) as mock_exec:
-            result = await start(
-                session_dir, "rtdmn.xml", PipelineConfig()
-            )
+            result = await start(session_dir, "rtdmn.xml", PipelineConfig())
 
         assert isinstance(result, MurfiProcess)
         assert result.xml_name == "rtdmn.xml"
@@ -83,6 +81,29 @@ class TestStart:
         # Verify apptainer was invoked.
         call_args = mock_exec.call_args
         assert "apptainer" in call_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_start_keeps_previous_attempt_log(self, tmp_path: Path) -> None:
+        session_dir = tmp_path / "subjects" / "sub-001" / "ses-rt15"
+        (session_dir / "log").mkdir(parents=True)
+        old_log = session_dir / "log" / "murfi_rtdmn_feedback-01.log"
+        old_log.write_text("received image from scanner: series 2 acquisition 1\n")
+
+        fake_proc = AsyncMock(spec=asyncio.subprocess.Process)
+        fake_proc.returncode = None
+        with patch(
+            "mindfulness_nf.orchestration.murfi.asyncio.create_subprocess_exec",
+            return_value=fake_proc,
+        ):
+            result = await start(
+                session_dir, "rtdmn.xml", PipelineConfig(), log_name="rtdmn_feedback-01"
+            )
+
+        kept = list((session_dir / "log").glob("murfi_rtdmn_feedback-01.prev-*.log"))
+        assert len(kept) == 1
+        assert "acquisition 1" in kept[0].read_text()
+        assert result.log_path == old_log
+        assert old_log.read_text() == ""
 
     @pytest.mark.asyncio
     async def test_start_passes_bind_mounts(self, tmp_path: Path) -> None:
@@ -108,10 +129,14 @@ class TestStart:
         # both halves identical, and always absolute.
         subjects_root = str((tmp_path / "subjects").resolve())
         assert bind_val == f"{subjects_root}:{subjects_root}"
-        assert bind_val.startswith("/"), "apptainer rejects relative --bind destinations"
+        assert bind_val.startswith(
+            "/"
+        ), "apptainer rejects relative --bind destinations"
 
     @pytest.mark.asyncio
-    async def test_start_resolves_relative_subject_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_start_resolves_relative_subject_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Regression for MURFI exit 255 / apptainer 'destination must be absolute'.
 
         Running the CLI with the default ``--subjects-dir murfi/subjects`` (relative)
@@ -120,7 +145,9 @@ class TestStart:
         """
         subjects = tmp_path / "subjects"
         (subjects / "sub-004" / "ses-loc3" / "xml").mkdir(parents=True)
-        (subjects / "sub-004" / "ses-loc3" / "xml" / "rest.xml").write_text("<scanner/>")
+        (subjects / "sub-004" / "ses-loc3" / "xml" / "rest.xml").write_text(
+            "<scanner/>"
+        )
 
         monkeypatch.chdir(tmp_path)
         relative_session_dir = Path("subjects/sub-004/ses-loc3")
@@ -219,12 +246,16 @@ class TestStop:
         # After stop sends SIGTERM, the process exits.
         mp.process.wait = AsyncMock(return_value=0)
 
-        with patch("mindfulness_nf.orchestration.murfi.os.killpg") as mock_killpg, \
-             patch("mindfulness_nf.orchestration.murfi.os.getpgid", return_value=12345):
+        with patch(
+            "mindfulness_nf.orchestration.murfi.os.killpg"
+        ) as mock_killpg, patch(
+            "mindfulness_nf.orchestration.murfi.os.getpgid", return_value=12345
+        ):
             await stop(mp)
 
         # First call should be SIGTERM.
         import signal
+
         mock_killpg.assert_any_call(12345, signal.SIGTERM)
 
     @pytest.mark.asyncio
@@ -233,11 +264,15 @@ class TestStop:
         # Simulate process that doesn't respond to SIGTERM.
         mp.process.wait = AsyncMock(side_effect=asyncio.TimeoutError)
 
-        with patch("mindfulness_nf.orchestration.murfi.os.killpg") as mock_killpg, \
-             patch("mindfulness_nf.orchestration.murfi.os.getpgid", return_value=12345):
+        with patch(
+            "mindfulness_nf.orchestration.murfi.os.killpg"
+        ) as mock_killpg, patch(
+            "mindfulness_nf.orchestration.murfi.os.getpgid", return_value=12345
+        ):
             await stop(mp, timeout=0.1)
 
         import signal
+
         calls = [c.args for c in mock_killpg.call_args_list]
         assert (12345, signal.SIGTERM) in calls
         assert (12345, signal.SIGKILL) in calls
@@ -246,8 +281,10 @@ class TestStop:
     async def test_stop_reraises_cancelled(self, tmp_path: Path) -> None:
         mp = _make_murfi_process(tmp_path, returncode=None)
 
-        with patch("mindfulness_nf.orchestration.murfi.os.killpg", side_effect=asyncio.CancelledError), \
-             patch("mindfulness_nf.orchestration.murfi.os.getpgid", return_value=12345):
+        with patch(
+            "mindfulness_nf.orchestration.murfi.os.killpg",
+            side_effect=asyncio.CancelledError,
+        ), patch("mindfulness_nf.orchestration.murfi.os.getpgid", return_value=12345):
             with pytest.raises(asyncio.CancelledError):
                 await stop(mp)
 
@@ -262,12 +299,16 @@ class TestConfigureMoco:
 
     def test_enable_moco_when_false(self, tmp_path: Path) -> None:
         xml_path = tmp_path / "2vol.xml"
-        xml_path.write_text(textwrap.dedent("""\
+        xml_path.write_text(
+            textwrap.dedent(
+                """\
             <?xml version="1.0" encoding="UTF-8"?>
             <scanner>
               <option name="onlyReadMoCo">  false </option>
             </scanner>
-        """))
+        """
+            )
+        )
 
         changed = configure_moco(xml_path, use_moco=True)
 
@@ -277,12 +318,16 @@ class TestConfigureMoco:
 
     def test_disable_moco_when_true(self, tmp_path: Path) -> None:
         xml_path = tmp_path / "rtdmn.xml"
-        xml_path.write_text(textwrap.dedent("""\
+        xml_path.write_text(
+            textwrap.dedent(
+                """\
             <?xml version="1.0" encoding="UTF-8"?>
             <scanner>
               <option name="onlyReadMoCo">  true </option>
             </scanner>
-        """))
+        """
+            )
+        )
 
         changed = configure_moco(xml_path, use_moco=False)
 
@@ -292,12 +337,16 @@ class TestConfigureMoco:
 
     def test_no_change_when_already_correct(self, tmp_path: Path) -> None:
         xml_path = tmp_path / "2vol.xml"
-        xml_path.write_text(textwrap.dedent("""\
+        xml_path.write_text(
+            textwrap.dedent(
+                """\
             <?xml version="1.0" encoding="UTF-8"?>
             <scanner>
               <option name="onlyReadMoCo">  true </option>
             </scanner>
-        """))
+        """
+            )
+        )
 
         changed = configure_moco(xml_path, use_moco=True)
 
@@ -305,12 +354,16 @@ class TestConfigureMoco:
 
     def test_skips_rest_xml(self, tmp_path: Path) -> None:
         xml_path = tmp_path / "rest.xml"
-        xml_path.write_text(textwrap.dedent("""\
+        xml_path.write_text(
+            textwrap.dedent(
+                """\
             <?xml version="1.0" encoding="UTF-8"?>
             <scanner>
               <option name="onlyReadMoCo">  false </option>
             </scanner>
-        """))
+        """
+            )
+        )
 
         changed = configure_moco(xml_path, use_moco=True)
 
@@ -320,9 +373,7 @@ class TestConfigureMoco:
 
     def test_handles_arbitrary_whitespace(self, tmp_path: Path) -> None:
         xml_path = tmp_path / "rtdmn.xml"
-        xml_path.write_text(
-            '<option name="onlyReadMoCo">   false   </option>'
-        )
+        xml_path.write_text('<option name="onlyReadMoCo">   false   </option>')
 
         changed = configure_moco(xml_path, use_moco=True)
 
@@ -333,7 +384,9 @@ class TestConfigureMoco:
     def test_real_xml_from_template(self, tmp_path: Path) -> None:
         """Test with realistic XML matching the actual template files."""
         xml_path = tmp_path / "2vol.xml"
-        xml_path.write_text(textwrap.dedent("""\
+        xml_path.write_text(
+            textwrap.dedent(
+                """\
             <?xml version="1.0" encoding="UTF-8"?>
             <study name="rtDMN">
                 <option name="softwareDir"> /opt/murfi/ </option>
@@ -348,7 +401,9 @@ class TestConfigureMoco:
               <option name="receiveImages">  true </option>
               <option name="onlyReadMoCo">  true </option>
             </scanner>
-        """))
+        """
+            )
+        )
 
         changed = configure_moco(xml_path, use_moco=False)
 
@@ -438,8 +493,9 @@ class TestMonitorVolumes:
                 mp.process.returncode = 0
             await original_sleep(0)
 
-        with patch("mindfulness_nf.orchestration.murfi.asyncio.sleep", side_effect=fake_sleep), \
-             patch("mindfulness_nf.orchestration.murfi._loop_time", return_value=0.0):
+        with patch(
+            "mindfulness_nf.orchestration.murfi.asyncio.sleep", side_effect=fake_sleep
+        ), patch("mindfulness_nf.orchestration.murfi._loop_time", return_value=0.0):
             await monitor_volumes(mp, expected=20, on_update=on_update)
 
         # Should have at least one update from the loop + the final update.
@@ -469,8 +525,9 @@ class TestMonitorVolumes:
         async def fake_sleep(duration: float) -> None:
             mp.process.returncode = 0
 
-        with patch("mindfulness_nf.orchestration.murfi.asyncio.sleep", side_effect=fake_sleep), \
-             patch("mindfulness_nf.orchestration.murfi._loop_time", return_value=0.0):
+        with patch(
+            "mindfulness_nf.orchestration.murfi.asyncio.sleep", side_effect=fake_sleep
+        ), patch("mindfulness_nf.orchestration.murfi._loop_time", return_value=0.0):
             await monitor_volumes(mp, expected=20, on_update=on_update)
 
         # Final update should be green (20/20).
@@ -497,8 +554,11 @@ class TestMonitorVolumes:
         async def fake_sleep(duration: float) -> None:
             mp.process.returncode = 0
 
-        with patch("mindfulness_nf.orchestration.murfi.asyncio.sleep", side_effect=fake_sleep), \
-             patch("mindfulness_nf.orchestration.murfi._loop_time", side_effect=mock_time):
+        with patch(
+            "mindfulness_nf.orchestration.murfi.asyncio.sleep", side_effect=fake_sleep
+        ), patch(
+            "mindfulness_nf.orchestration.murfi._loop_time", side_effect=mock_time
+        ):
             await monitor_volumes(mp, expected=20, on_update=on_update)
 
         # At least one update should be red due to zero volumes.
@@ -533,8 +593,11 @@ class TestMonitorVolumes:
             if call_count[0] >= 1:
                 mp.process.returncode = 0
 
-        with patch("mindfulness_nf.orchestration.murfi.asyncio.sleep", side_effect=fake_sleep), \
-             patch("mindfulness_nf.orchestration.murfi._loop_time", side_effect=mock_time):
+        with patch(
+            "mindfulness_nf.orchestration.murfi.asyncio.sleep", side_effect=fake_sleep
+        ), patch(
+            "mindfulness_nf.orchestration.murfi._loop_time", side_effect=mock_time
+        ):
             await monitor_volumes(mp, expected=20, on_update=on_update)
 
         # The loop iteration with 10s gap should produce yellow.

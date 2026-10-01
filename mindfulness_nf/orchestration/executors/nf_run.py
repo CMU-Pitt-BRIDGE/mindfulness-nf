@@ -88,6 +88,7 @@ class NfRunStepExecutor:
 
         self._murfi: murfi_mod.MurfiProcess | None = None
         self._psychopy: asyncio.subprocess.Process | None = None
+        self._push_task: asyncio.Task[None] | None = None
         self._log_baseline = 0
         self._volumes = 0
         self._target = config.progress_target
@@ -124,17 +125,9 @@ class NfRunStepExecutor:
             # about to start — PsychoPy launches and the scan begins
             # concurrently, so the subject sees stimuli while MURFI
             # receives real-time volumes and streams activation to PsychoPy.
-            on_progress(
-                StepProgress(
-                    value=self._volumes,
-                    target=self._target,
-                    unit=self._config.progress_unit,
-                    phase="murfi",
-                    detail="MURFI ready — press D to launch PsychoPy + start scan",
-                    awaiting_advance=True,
-                )
-            )
-            await self._advance_event.wait()
+            gate_failure = await self._wait_at_gate(on_progress)
+            if gate_failure is not None:
+                return gate_failure
             if self._stopped:
                 await self._shutdown()
                 return StepOutcome(
@@ -169,6 +162,7 @@ class NfRunStepExecutor:
                 # MURFI produced zero or too-few saved volumes so the
                 # operator can catch it before the next subject.
                 import logging as _logging
+
                 _logging.getLogger(__name__).warning(
                     "MURFI saved %d raw img files for step %s "
                     "(task=%s run=%s, target=%d) — raw volumes may be "
@@ -199,6 +193,7 @@ class NfRunStepExecutor:
                     )
                 except Exception:  # noqa: BLE001 — diagnostic, never fail the step
                     import logging as _logging
+
                     _logging.getLogger(__name__).exception(
                         "motion extraction raised for step %s", self._config.name
                     )
@@ -228,7 +223,7 @@ class NfRunStepExecutor:
                     await murfi_mod.stop(self._murfi)
                     self._murfi = None
                 await self._start_murfi()
-                # ``murfi.start`` truncates the log to 0 bytes. Reset the
+                # ``murfi.start`` starts an empty log. Reset the
                 # monitor's baseline so it reads from the top of the fresh
                 # log; saving the old size would cause the monitor to sit
                 # silent until the new log grew past the old offset (bug).
@@ -316,9 +311,63 @@ class NfRunStepExecutor:
                 )
             await asyncio.sleep(0.25)
 
-    async def _run_phase2_psychopy(
-        self, on_progress: ProgressCallback
-    ) -> StepOutcome:
+    async def _wait_at_gate(self, on_progress: ProgressCallback) -> StepOutcome | None:
+        """Hold at the phase gate until D, counting volumes MURFI receives meanwhile.
+
+        If the scanner starts before the operator presses D, MURFI is already
+        ingesting; the gate shows that count so it does not read as 0.
+        Returns a failure outcome if MURFI exits while waiting, else ``None``.
+        """
+        on_progress(self._gate_snapshot())
+        while not self._advance_event.is_set():
+            if await self._drain_volume_lines():
+                on_progress(self._gate_snapshot())
+            murfi = self._murfi
+            if murfi is not None and murfi.process.returncode is not None:
+                rc = murfi.process.returncode
+                await self._shutdown()
+                return StepOutcome(
+                    succeeded=False,
+                    final_progress=self._snapshot_murfi(),
+                    error=f"MURFI exited {rc} before PsychoPy launched",
+                )
+            try:
+                await asyncio.wait_for(self._advance_event.wait(), timeout=0.25)
+            except TimeoutError:
+                pass
+        return None
+
+    def _gate_snapshot(self) -> StepProgress:
+        if self._volumes:
+            detail = (
+                f"scanner is sending ({self._volumes} volumes received) — "
+                "press D to launch PsychoPy"
+            )
+        else:
+            detail = "MURFI ready — press D to launch PsychoPy + start scan"
+        return StepProgress(
+            value=self._volumes,
+            target=self._target,
+            unit=self._config.progress_unit,
+            phase="murfi",
+            detail=detail,
+            awaiting_advance=True,
+        )
+
+    async def _drain_volume_lines(self) -> int:
+        """Count new ``received image`` lines in MURFI's log; return how many."""
+        murfi = self._murfi
+        if murfi is None:
+            return 0
+        new_text = await asyncio.to_thread(
+            _read_from, murfi.log_path, self._log_baseline
+        )
+        self._log_baseline += len(new_text.encode())
+        new = len(_VOLUME_LINE_RE.findall(new_text))
+        self._volumes += new
+        return new
+
+    async def _run_phase2_psychopy(self, on_progress: ProgressCallback) -> StepOutcome:
         """MURFI stays alive; PsychoPy is the completion signal.
 
         Handles PsychoPy crash by emitting a progress update and waiting for
@@ -336,6 +385,15 @@ class NfRunStepExecutor:
             )
 
         on_progress(self._phase2_snapshot("PsychoPy running"))
+        # Real source: no-op (the scanner pushes). Dry-run: replays volumes.
+        assert self._config.xml_name is not None
+        self._push_task = asyncio.create_task(
+            self._scanner_source.push_vsend(
+                self._subject_dir / "xml" / self._config.xml_name,
+                self._subject_dir,
+                self._config,
+            )
+        )
 
         while True:
             if self._stopped:
@@ -360,22 +418,28 @@ class NfRunStepExecutor:
             # volume progress ticks alongside PsychoPy. MURFI + PsychoPy run
             # concurrently: scanner pushes → MURFI receives → infoserver
             # streams to PsychoPy → PsychoPy renders feedback.
-            new_text = await asyncio.to_thread(
-                _read_from, murfi.log_path, self._log_baseline
-            )
-            if new_text:
-                self._log_baseline += len(new_text.encode())
-                for line in new_text.splitlines():
-                    if _VOLUME_LINE_RE.search(line):
-                        self._volumes += 1
-                        on_progress(self._snapshot_murfi(
-                            phase="psychopy", detail="PsychoPy running"
-                        ))
+            if await self._drain_volume_lines():
+                on_progress(
+                    self._snapshot_murfi(phase="psychopy", detail="PsychoPy running")
+                )
 
             proc = self._psychopy
             if proc is not None and proc.returncode is not None:
                 rc = proc.returncode
                 if rc == 0:
+                    await self._drain_volume_lines()
+                    if self._volumes == 0:
+                        await self._shutdown()
+                        return StepOutcome(
+                            succeeded=False,
+                            final_progress=self._snapshot_murfi(phase="psychopy"),
+                            error=(
+                                "PsychoPy finished but MURFI received 0 scanner "
+                                "volumes; check that the scanner sequence sends "
+                                "real-time images to port "
+                                f"{self._scanner_config.vsend_port}"
+                            ),
+                        )
                     artifacts = self._collect_artifacts()
                     await self._shutdown()
                     return StepOutcome(
@@ -468,13 +532,7 @@ class NfRunStepExecutor:
         )
 
     def _phase2_snapshot(self, detail: str) -> StepProgress:
-        return StepProgress(
-            value=0,
-            target=1,
-            unit="stages",
-            phase="psychopy",
-            detail=detail,
-        )
+        return self._snapshot_murfi(phase="psychopy", detail=detail)
 
     def _current_snapshot(self) -> StepProgress:
         if self._phase == "psychopy":
@@ -482,6 +540,17 @@ class NfRunStepExecutor:
         return self._snapshot_murfi()
 
     async def _shutdown(self, *, timeout: float = 5.0) -> None:
+        if self._push_task is not None and not self._push_task.done():
+            try:
+                await self._scanner_source.cancel()
+            except Exception:  # noqa: BLE001 — best effort
+                pass
+            self._push_task.cancel()
+            try:
+                await self._push_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        self._push_task = None
         if self._psychopy is not None and self._psychopy.returncode is None:
             try:
                 self._psychopy.terminate()

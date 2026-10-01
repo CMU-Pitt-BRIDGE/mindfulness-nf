@@ -62,6 +62,73 @@ def _checks_from_artifacts(artifacts: dict | None) -> tuple[CheckResult, ...]:
     return tuple(result)
 
 
+def running_light(step: StepState) -> TrafficLight:
+    """Operator instruction for a RUNNING step: what to do next, colored by urgency.
+
+    Yellow means the operator must act; red means the run went wrong.
+    """
+    name = step.config.name
+    got = step.progress_current
+    target = step.config.progress_target
+    detail = step.detail_message or ""
+    kind = step.config.kind
+
+    if "crashed" in detail:
+        return TrafficLight(Color.RED, f"{name}: PsychoPy crashed", detail=detail)
+
+    if kind is StepKind.NF_RUN and step.awaiting_advance:
+        if got:
+            return TrafficLight(
+                Color.RED,
+                f"{name}: scan started before PsychoPy",
+                detail=(
+                    f"{got} volumes arrived with no feedback on screen. Stop the "
+                    "scan on the console, press I to clear this run, then D to "
+                    "start it again."
+                ),
+            )
+        return TrafficLight(
+            Color.YELLOW,
+            f"{name}: press D to open PsychoPy",
+            detail=(
+                "Do NOT start the scan yet. Start it once the participant "
+                "screen shows 'waiting for scanner'."
+            ),
+        )
+
+    if kind in (StepKind.NF_RUN, StepKind.VSEND_SCAN) and got == 0:
+        if kind is StepKind.NF_RUN and step.phase == "psychopy":
+            msg = f"{name}: PsychoPy is waiting, start the scan now"
+        elif kind is StepKind.VSEND_SCAN:
+            msg = f"{name}: MURFI is listening, start the scan now"
+        else:
+            return TrafficLight(
+                Color.GREEN, f"{name}: starting MURFI", detail=detail or None
+            )
+        return TrafficLight(
+            Color.YELLOW,
+            msg,
+            detail=(
+                "No scanner images yet. If the scan is already running, the "
+                "sequence is not sending real-time images to this computer: "
+                "check its real-time export (vSend) setting."
+            ),
+        )
+
+    if kind in (StepKind.NF_RUN, StepKind.VSEND_SCAN):
+        return TrafficLight(
+            Color.GREEN,
+            f"{name}: receiving scanner images",
+            detail=f"{got}/{target} volumes" + (f" ({detail})" if detail else ""),
+        )
+
+    return TrafficLight(
+        Color.GREEN,
+        f"{name} running",
+        detail=detail or (f"{got}/{target}" if target else None),
+    )
+
+
 def _step_state_to_run_state(step: StepState) -> RunState:
     """Adapter: map persistent ``StepState`` to the ``RunState`` view model."""
     artifacts = step.artifacts or {}
@@ -303,13 +370,7 @@ class SessionScreen(Screen[None]):
             case StepStatus.COMPLETED:
                 return TrafficLight(Color.GREEN, f"{step.config.name} complete")
             case StepStatus.RUNNING:
-                msg = f"{step.config.name} running"
-                detail = step.detail_message or (
-                    f"{step.progress_current}/{step.config.progress_target}"
-                    if step.config.progress_target
-                    else None
-                )
-                return TrafficLight(Color.GREEN, msg, detail=detail)
+                return running_light(step)
             case StepStatus.FAILED:
                 return TrafficLight(
                     Color.RED,
@@ -332,12 +393,10 @@ class SessionScreen(Screen[None]):
                 if running_idx is None:
                     parts.append("[d] Start")
                 else:
-                    parts.append(
-                        "Another step is running — [i] interrupt it first"
-                    )
+                    parts.append("Another step is running — [i] interrupt it first")
             case StepStatus.RUNNING:
                 if step.awaiting_advance:
-                    parts.append("[d] Advance phase")
+                    parts.append("[d] Open PsychoPy (then start the scan)")
                 parts.append("[i] Interrupt")
                 components = self._runner.available_components
                 if "murfi" in components:
@@ -381,9 +440,7 @@ class SessionScreen(Screen[None]):
                 # advance() auto-chains start_current if new cursor is pending.
                 self._runner.advance()
             case StepStatus.FAILED:
-                self._notify(
-                    "FAILED — press R to redo, I to clear, or N to move on"
-                )
+                self._notify("FAILED — press R to redo, I to clear, or N to move on")
 
     async def action_rkey(self) -> None:
         """R: restart step at cursor (with confirmation on completed)."""
@@ -530,4 +587,3 @@ class SessionScreen(Screen[None]):
             log.add_line(message)
         except Exception:
             pass
-

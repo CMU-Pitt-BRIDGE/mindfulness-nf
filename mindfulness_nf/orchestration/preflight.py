@@ -338,6 +338,30 @@ async def check_stale_murfi_processes() -> CheckResult:
     )
 
 
+_NF_SESSION_DIRS = frozenset({"ses-rt15", "ses-rt30"})
+
+
+async def check_nf_masks(mask_dir: Path) -> CheckResult:
+    """Check that Process produced the DMN and CEN masks ``rtdmn.xml`` loads."""
+    missing = [
+        roi
+        for roi in ("dmn", "cen")
+        if not any((mask_dir / f"{roi}{ext}").is_file() for ext in (".nii", ".nii.gz"))
+    ]
+    if missing:
+        return CheckResult(
+            name="DMN/CEN masks",
+            passed=False,
+            message=(
+                f"missing {', '.join(missing)} in {mask_dir}; "
+                "run Localizer (1) then Process (4) for this subject first"
+            ),
+        )
+    return CheckResult(
+        name="DMN/CEN masks", passed=True, message=f"dmn and cen found in {mask_dir}"
+    )
+
+
 async def run_preflight(
     config: ScannerConfig,
     subject_dir: Path | None = None,
@@ -373,7 +397,7 @@ async def run_preflight(
         t_fw4006 = tg.create_task(check_firewall_port_4006())
         t_stale = tg.create_task(check_stale_murfi_processes())
 
-    return (
+    results = (
         t_fsl.result(),
         t_vsend.result(),
         t_apptainer.result(),
@@ -389,3 +413,6 @@ async def run_preflight(
         t_fw4006.result(),
         t_stale.result(),
     )
+    if subject_dir is not None and subject_dir.name in _NF_SESSION_DIRS:
+        results += (await check_nf_masks(subject_dir.parent / "mask"),)
+    return results

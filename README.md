@@ -54,12 +54,12 @@ uv run mindfulness-nf --subject sub-001
 
 ### Session types
 
-| Key | Type | Purpose |
-|-----|------|---------|
-| 1 | Localizer (loc3) | Setup/preflight + 2 resting-state runs (250 vols each) |
-| 2 | RT15 | 8 steps: Setup, Transfer Pre, Feedback 1-5, Transfer Post |
-| 3 | RT30 | 14 steps: RT15 plus Transfer Post 1, Feedback 6-10, Transfer Post 2 |
-| 4 | Process | FSL pipeline: merge, MELODIC, DMN/CEN extraction, registration, QC |
+| Key | Type             | Purpose                                                             |
+| --- | ---------------- | ------------------------------------------------------------------- |
+| 1   | Localizer (loc3) | Setup/preflight + 2 resting-state runs (250 vols each)              |
+| 2   | RT15             | 8 steps: Setup, Transfer Pre, Feedback 1-5, Transfer Post           |
+| 3   | RT30             | 14 steps: RT15 plus Transfer Post 1, Feedback 6-10, Transfer Post 2 |
+| 4   | Process          | FSL pipeline: merge, MELODIC, DMN/CEN extraction, registration, QC  |
 
 ### Session order
 
@@ -104,23 +104,23 @@ The cache lives at `murfi/dry_run_cache/` (gitignored). If the cache is missing,
 
 The help bar shows only keys valid for the current step status. Cursor navigation never interrupts a running step.
 
-| Key | When valid | Action |
-|-----|------------|--------|
-| `d` | status=pending | Start the step |
-| `d` | status=running, `awaiting_advance=True` | Advance phase (MURFI to PsychoPy) |
-| `d` | status=completed | Move cursor forward; auto-start next pending step |
-| `d` | status=failed | No-op; press `r` or `i` |
-| `r` | cursor step not running, no other step running | Clear files and restart step (confirms on completed) |
-| `r` | cursor step running | Stop, clear, restart |
-| `i` | any step running | Interrupt running step; clear its partial data; mark pending |
-| `i` | cursor step failed, nothing running | Clear cursor step's partial data; mark pending |
-| `b` / `left` | any | Move cursor backward |
-| `n` / `right` | any | Move cursor forward |
-| `g` | any | Prompt for step number; jump cursor |
-| `m` | status=running, `murfi` in components | Relaunch MURFI; keep data and progress |
-| `p` | status=running, `psychopy` in components | Relaunch PsychoPy; keep data and progress |
-| `s` | any | Return to the session menu (1/2/3/4); prompts before stopping a running step |
-| `esc` | any | Quit the app; prompts before stopping a running step |
+| Key           | When valid                                     | Action                                                                          |
+| ------------- | ---------------------------------------------- | ------------------------------------------------------------------------------- |
+| `d`           | status=pending                                 | Start the step                                                                  |
+| `d`           | status=running, `awaiting_advance=True`        | Open PsychoPy; start the scan only after its screen shows "waiting for scanner" |
+| `d`           | status=completed                               | Move cursor forward; auto-start next pending step                               |
+| `d`           | status=failed                                  | No-op; press `r` or `i`                                                         |
+| `r`           | cursor step not running, no other step running | Clear files and restart step (confirms on completed)                            |
+| `r`           | cursor step running                            | Stop, clear, restart                                                            |
+| `i`           | any step running                               | Interrupt running step; clear its partial data; mark pending                    |
+| `i`           | cursor step failed, nothing running            | Clear cursor step's partial data; mark pending                                  |
+| `b` / `left`  | any                                            | Move cursor backward                                                            |
+| `n` / `right` | any                                            | Move cursor forward                                                             |
+| `g`           | any                                            | Prompt for step number; jump cursor                                             |
+| `m`           | status=running, `murfi` in components          | Relaunch MURFI; keep data and progress                                          |
+| `p`           | status=running, `psychopy` in components       | Relaunch PsychoPy; keep data and progress                                       |
+| `s`           | any                                            | Return to the session menu (1/2/3/4); prompts before stopping a running step    |
+| `esc`         | any                                            | Quit the app; prompts before stopping a running step                            |
 
 `r` destroys on-disk data for the step. `m` and `p` keep data; they restart one subprocess.
 
@@ -221,31 +221,31 @@ holds the full series. It keeps everything analysis-relevant: PsychoPy data
 (`roi_outputs.csv`, events TSVs, sliders, logs), MURFI logs, DMN/CEN masks, the
 ICA, motion params, and the `curact-*`/`design-*` activation maps.
 
-| Mode | Includes | Approx size |
-|------|----------|-------------|
-| (default) | everything except raw images | ~3-9 GB |
-| `--lean` | also skips regenerable FSL dirs (`*.gica`/`*.ica`/`*.feat`) | ~3-4 GB |
-| `--full` | bit-for-bit, including raw images | ~12 GB |
+| Mode      | Includes                                                    | Approx size |
+| --------- | ----------------------------------------------------------- | ----------- |
+| (default) | everything except raw images                                | ~3-9 GB     |
+| `--lean`  | also skips regenerable FSL dirs (`*.gica`/`*.ica`/`*.feat`) | ~3-4 GB     |
+| `--full`  | bit-for-bit, including raw images                           | ~12 GB      |
 
 Subjects run after the feedback-image cleanup are smaller. Add `--dry-run` to
 preview; afterward, verify the copy and eject the drive.
 
 ## Protocol constants
 
-| Constant | Value |
-|----------|-------|
-| TR | 1.2 s |
-| Resting-state measurements | 250 |
-| Feedback measurements | 150 |
-| PsychoPy run duration | 150 s |
-| ICA components | 128 |
-| Default scale factor | 10.0 |
-| Hit target range | 3-5 per TR |
-| Scanner IP | 192.168.2.1 |
-| Vsend port | 50000 |
-| DICOM port | 4006 |
-| Infoserver port | 15001 |
-| MURFI container | /opt/murfi/apptainer-images/murfi.sif |
+| Constant                   | Value                                 |
+| -------------------------- | ------------------------------------- |
+| TR                         | 1.2 s                                 |
+| Resting-state measurements | 250                                   |
+| Feedback measurements      | 150                                   |
+| PsychoPy run duration      | 150 s                                 |
+| ICA components             | 128                                   |
+| Default scale factor       | 10.0                                  |
+| Hit target range           | 3-5 per TR                            |
+| Scanner IP                 | 192.168.2.1                           |
+| Vsend port                 | 50000                                 |
+| DICOM port                 | 4006                                  |
+| Infoserver port            | 15001                                 |
+| MURFI container            | /opt/murfi/apptainer-images/murfi.sif |
 
 ## System requirements
 
@@ -262,17 +262,17 @@ preview; afterward, verify the copy and eject the drive.
 
 Based on the rt-BPD codebase (Clemens Bauer, 2025) with these changes:
 
-| Change | Reason |
-|--------|--------|
-| Neurological orientation throughout | Eliminates LPS/neurological confusion in registration |
-| Melodic IC resampling (applywarp) | Fixes 74-to-68 slice dimension mismatch in multi-run ICA |
-| Bilateral CEN selection | Lateralization analysis picks most bilateral CEN component |
-| 4-voxel brain mask erosion | Keeps masks inside brain boundary |
-| Robust reference selection (`ls -v`) | Prevents wrong-file selection vs fragile `ls -t` |
-| Safe file operations (`cp`, `rm -rf`) | Prevents data loss from destructive `mv` |
-| ICA overwrite protection | Prevents accidental 25-minute re-runs |
-| Apptainer container at /opt/murfi | System-installed MURFI v2.1.1 |
-| Single-machine (localhost) | PsychoPy connects to MURFI on 127.0.0.1 |
-| BIDS subject IDs and session layout | Standard naming; `ls` reveals what ran |
-| Textual TUI with `SessionRunner` | Replaces zenity/bash/tmux; persists every transition; supports resume and dry-run |
-| Python 3.13, unified .venv | Single environment for TUI, orchestration, and PsychoPy |
+| Change                                | Reason                                                                            |
+| ------------------------------------- | --------------------------------------------------------------------------------- |
+| Neurological orientation throughout   | Eliminates LPS/neurological confusion in registration                             |
+| Melodic IC resampling (applywarp)     | Fixes 74-to-68 slice dimension mismatch in multi-run ICA                          |
+| Bilateral CEN selection               | Lateralization analysis picks most bilateral CEN component                        |
+| 4-voxel brain mask erosion            | Keeps masks inside brain boundary                                                 |
+| Robust reference selection (`ls -v`)  | Prevents wrong-file selection vs fragile `ls -t`                                  |
+| Safe file operations (`cp`, `rm -rf`) | Prevents data loss from destructive `mv`                                          |
+| ICA overwrite protection              | Prevents accidental 25-minute re-runs                                             |
+| Apptainer container at /opt/murfi     | System-installed MURFI v2.1.1                                                     |
+| Single-machine (localhost)            | PsychoPy connects to MURFI on 127.0.0.1                                           |
+| BIDS subject IDs and session layout   | Standard naming; `ls` reveals what ran                                            |
+| Textual TUI with `SessionRunner`      | Replaces zenity/bash/tmux; persists every transition; supports resume and dry-run |
+| Python 3.13, unified .venv            | Single environment for TUI, orchestration, and PsychoPy                           |

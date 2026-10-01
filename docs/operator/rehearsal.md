@@ -35,9 +35,8 @@ Pick the session type you will run live today: RT15 or RT30. Rehearse that exact
 - [ ] Launch: `uv run mindfulness-nf --dry-run --subject sub-rehearse-YYYYMMDD`
 - [ ] Press `2` for RT15 or `3` for RT30
 - [ ] Setup step: press `d`; verify preflight checks pass green
-- [ ] 2-volume step: press `d`; wait for 2/2 volumes; verify green
-- [ ] Transfer Pre: press `d`; wait for MURFI to reach 150/150; press `d` to gate to PsychoPy; let PsychoPy run to completion
-- [ ] Feedback 1-5 (RT15) or Feedback 1-5, Transfer Post 1, Feedback 6-10 (RT30): for each, press `d`, wait for MURFI, press `d` at the phase gate, let PsychoPy finish
+- [ ] Transfer Pre: press `d` to start MURFI; when the status turns yellow ("press D to open PsychoPy"), press `d`; volumes count up while PsychoPy runs; let PsychoPy run to completion
+- [ ] Feedback 1-5 (RT15) or Feedback 1-5, Transfer Post 1, Feedback 6-10 (RT30): for each, press `d`, wait for the yellow "press D to open PsychoPy", press `d`, let PsychoPy finish
 - [ ] Final Transfer Post: complete as above
 - [ ] Verify every step shows `completed` and the session summary renders a full-green list
 
@@ -92,7 +91,7 @@ Start a fresh dry-run for each sub-scenario. Reuse the same subject ID; the runn
 
 - [ ] All steps above checked and green
 - [ ] Rehearsal subject directory cleaned up or kept for audit (operator's choice)
-- [ ] Date: __________
-- [ ] Operator initials: __________
+- [ ] Date: `__________`
+- [ ] Operator initials: `__________`
 
 If any item failed, file an issue and do not run the live session until the failure is resolved.

@@ -12,6 +12,14 @@ from mindfulness_nf.models import SessionState, StepState
 from mindfulness_nf.sessions import SESSION_CONFIGS
 
 
+@pytest.fixture(autouse=True)
+def _no_x11_display(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep window placement off whatever X display the test host has."""
+    from mindfulness_nf.orchestration import displays
+
+    monkeypatch.setattr(displays, "_open_display", lambda: None)
+
+
 # ---------------------------------------------------------------------------
 # Existing fixtures (unchanged)
 # ---------------------------------------------------------------------------

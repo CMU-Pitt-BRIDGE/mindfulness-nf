@@ -102,6 +102,13 @@ expInfo = {'participant':input_participant, 'run':input_run, 'anchor': input_anc
 # Default to fake mode for safety — set to False for real scanning
 murfi_FAKE=False
 
+# The TUI passes every field on the command line (and sets
+# MINDFULNESS_NF_TASK), so skip the dialog: it only adds a click before the
+# task window opens. Manual launches still get the dialog.
+if os.environ.get('MINDFULNESS_NF_TASK') and num_cmd_line_arguments >= 5:
+    expInfo['feedback_on'] = input_feedback[0]
+    expInfo['feedback_condition'] = input_feedback_condition[0]
+
 # Show dialogue box until all participant info has been entered
 while expInfo['feedback_on'] not in ['Feedback', 'No Feedback']:
     expInfo['feedback_on'] =  input_feedback
@@ -328,15 +335,19 @@ logging.console.setLevel(logging.WARNING)  # this outputs to the screen, not a f
 endExpNow = False  # flag for 'escape' or other condition => quit the exp
 
 # Start Code - component code to be run before the window creation
-# Setup the Window. Screen index is configurable via MINDFULNESS_NF_SCREEN
-# env var (default 1 = secondary display at the scanner). If PsychoPy is
-# opening on a monitor you can't see (single-monitor laptop, wrong HDMI
-# order, etc.) the 't' trigger never registers because the fullscreen
-# window can't receive keyboard focus. Set MINDFULNESS_NF_SCREEN=0 to
-# open on the primary display.
-_screen = int(os.environ.get('MINDFULNESS_NF_SCREEN', '1'))
+# Setup the Window on the leftmost monitor (the participant display at the
+# scanner PC). Screen indices follow the driver's monitor order, not the
+# physical layout, so pick by x position. MINDFULNESS_NF_SCREEN=<index>
+# overrides.
+def _leftmost_screen_index():
+    import pyglet
+    _screens = pyglet.canvas.get_display().get_screens()
+    return min(range(len(_screens)), key=lambda i: (_screens[i].x, _screens[i].y))
+
+_screen_env = os.environ.get('MINDFULNESS_NF_SCREEN')
+_screen = int(_screen_env) if _screen_env else _leftmost_screen_index()
 print(f'[trigger] Opening PsychoPy window on screen={_screen}. '
-      f'Override with MINDFULNESS_NF_SCREEN=0 for primary display.')
+      f'Override with MINDFULNESS_NF_SCREEN=<index>.')
 win = visual.Window(size=(1920,1080), fullscr=True, screen=_screen, allowGUI=False, allowStencil=False,
     monitor='testMonitor', color=[-1,-1,-1], colorSpace='rgb',
     blendMode='avg', useFBO=True,
@@ -698,11 +709,11 @@ except Exception:
 # window has focus or not" (PsychoPy docs), so a scanner trigger lands even
 # when the operator's TUI terminal still has focus.
 #
-# FAIL-SAFE: if iohub can't start, _iohub_kb stays None and _read_all_keys()
-# falls back to event.getKeys() — i.e. exactly the previous behavior. This can
-# only help, never break the run. The raw key stream is still logged to
-# trigger_debug.log, so you can see what iohub actually reports for your
-# scanner's trigger and adjust the filter if needed.
+# _read_all_keys() merges iohub keys with the window queue (event.getKeys()).
+# iohub can start without error yet report no keys on some X servers; the
+# window queue then still delivers the trigger once the window has focus
+# (the TUI clicks into it after launch). The raw key stream is logged to
+# trigger_debug.log.
 _iohub_kb = None
 try:
     from psychopy.hardware import keyboard as _kbmod
@@ -719,14 +730,15 @@ except Exception:
 
 
 def _read_all_keys():
-    """Key names seen since the last call. Focus-independent via iohub when
-    available, else the pyglet window queue (event.getKeys), unchanged."""
+    """Key names seen since the last call, from iohub (focus-independent)
+    and the pyglet window queue (needs focus) combined."""
+    keys = []
     if _iohub_kb is not None:
         try:
-            return [k.name for k in _iohub_kb.getKeys(waitRelease=False)]
+            keys += [k.name for k in _iohub_kb.getKeys(waitRelease=False)]
         except Exception:
-            pass  # any iohub hiccup → fall back to the window queue
-    return event.getKeys()
+            pass  # iohub hiccup: the window queue below still reports keys
+    return keys + event.getKeys()
 
 #------Prepare to start Routine "trigger"-------
 t = 0

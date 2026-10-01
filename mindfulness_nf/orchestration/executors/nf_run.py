@@ -8,6 +8,7 @@ from pathlib import Path
 
 from mindfulness_nf.config import PipelineConfig, ScannerConfig
 from mindfulness_nf.models import StepConfig
+from mindfulness_nf.orchestration import displays
 from mindfulness_nf.orchestration import motion as motion_mod
 from mindfulness_nf.orchestration import murfi as murfi_mod
 from mindfulness_nf.orchestration import psychopy as psychopy_mod
@@ -34,6 +35,10 @@ _VOLUME_LINE_RE = re.compile(r"received image from scanner")
 # launches *concurrently* with scanner acquisition, not after it.
 _MURFI_READY_RE = re.compile(r"listening for images on port")
 _MURFI_READY_TIMEOUT_SECONDS = 15.0
+PSYCHOPY_FOCUSED = "PsychoPy focused on the participant screen"
+PSYCHOPY_NOT_FOCUSED = (
+    "PsychoPy NOT focused: click the participant screen before starting the scan"
+)
 
 
 class NfRunStepExecutor:
@@ -89,6 +94,8 @@ class NfRunStepExecutor:
         self._murfi: murfi_mod.MurfiProcess | None = None
         self._psychopy: asyncio.subprocess.Process | None = None
         self._push_task: asyncio.Task[None] | None = None
+        self._focus_task: asyncio.Task[None] | None = None
+        self._on_progress: ProgressCallback | None = None
         self._log_baseline = 0
         self._volumes = 0
         self._target = config.progress_target
@@ -373,6 +380,7 @@ class NfRunStepExecutor:
         Handles PsychoPy crash by emitting a progress update and waiting for
         operator relaunch/stop rather than failing the whole step.
         """
+        self._on_progress = on_progress
         # Launch first PsychoPy instance.
         try:
             self._psychopy = await self._launch_psychopy()
@@ -487,7 +495,7 @@ class NfRunStepExecutor:
 
     async def _launch_psychopy(self) -> asyncio.subprocess.Process:
         assert self._config.run is not None
-        return await psychopy_mod.launch(
+        proc = await psychopy_mod.launch(
             subject=self._subject_name,  # "sub-X", NOT "ses-Y"
             run_number=self._config.run,
             feedback=self._config.feedback,
@@ -500,6 +508,18 @@ class NfRunStepExecutor:
             session_type=self._layout.session_type,
             task=self._config.task,
         )
+        if self._focus_task is not None:
+            self._focus_task.cancel()
+        self._focus_task = asyncio.create_task(self._focus_psychopy())
+        return proc
+
+    async def _focus_psychopy(self) -> None:
+        """Give PsychoPy keyboard focus so the scanner trigger keystrokes reach it."""
+        focused = await displays.focus_psychopy()
+        if self._on_progress is not None and self._volumes == 0:
+            self._on_progress(
+                self._phase2_snapshot(PSYCHOPY_FOCUSED if focused else PSYCHOPY_NOT_FOCUSED)
+            )
 
     def _collect_artifacts(self) -> dict[str, object]:
         assert self._config.run is not None
@@ -540,6 +560,9 @@ class NfRunStepExecutor:
         return self._snapshot_murfi()
 
     async def _shutdown(self, *, timeout: float = 5.0) -> None:
+        if self._focus_task is not None:
+            self._focus_task.cancel()
+            self._focus_task = None
         if self._push_task is not None and not self._push_task.done():
             try:
                 await self._scanner_source.cancel()

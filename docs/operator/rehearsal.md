@@ -35,8 +35,8 @@ Pick the session type you will run live today: RT15 or RT30. Rehearse that exact
 - [ ] Launch: `uv run mindfulness-nf --dry-run --subject sub-rehearse-YYYYMMDD`
 - [ ] Press `2` for RT15 or `3` for RT30
 - [ ] Setup step: press `d`; verify preflight checks pass green
-- [ ] Transfer Pre: press `d` to start MURFI; when the status turns yellow ("press D to open PsychoPy"), press `d`; volumes count up while PsychoPy runs; let PsychoPy run to completion
-- [ ] Feedback 1-5 (RT15) or Feedback 1-5, Transfer Post 1, Feedback 6-10 (RT30): for each, press `d`, wait for the yellow "press D to open PsychoPy", press `d`, let PsychoPy finish
+- [ ] Transfer Pre: press `d` to start MURFI; when the status turns yellow ("press D to open PsychoPy"), press `d`; PsychoPy opens on the left monitor with focus; press SPACE through its instructions; at "waiting for scanner" press `t` to stand in for the scanner trigger; volumes count up while PsychoPy runs; let PsychoPy run to completion
+- [ ] Feedback 1-5 (RT15) or Feedback 1-5, Transfer Post 1, Feedback 6-10 (RT30): for each, press `d`, wait for the yellow "press D to open PsychoPy", press `d`, press SPACE through the instructions, press `t` at "waiting for scanner", let PsychoPy finish
 - [ ] Final Transfer Post: complete as above
 - [ ] Verify every step shows `completed` and the session summary renders a full-green list
 

@@ -375,3 +375,13 @@ def test_bids_tsv_no_double_sub_prefix() -> None:
         "Unconditional 'sub-' + id concatenation will produce sub-sub-<name> "
         "when id already has the prefix. Strip it first."
     )
+
+
+def test_trigger_reader_merges_iohub_and_window_queue() -> None:
+    """iohub can start cleanly yet report no keys (seen on an Xephyr test
+    display on BRIDGE-present-linux-01, 2026-10-01: iohub saw [], the
+    window queue saw ['t', 't', 't']). The trigger reader must always
+    consult the window queue too, not only when iohub raises."""
+    src = SCRIPT.read_text()
+    body = src.split("def _read_all_keys():", 1)[1].split("\n\n", 1)[0]
+    assert "return keys + event.getKeys()" in body

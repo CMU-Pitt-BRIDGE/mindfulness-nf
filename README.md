@@ -104,23 +104,23 @@ The cache lives at `murfi/dry_run_cache/` (gitignored). If the cache is missing,
 
 The help bar shows only keys valid for the current step status. Cursor navigation never interrupts a running step.
 
-| Key           | When valid                                     | Action                                                                          |
-| ------------- | ---------------------------------------------- | ------------------------------------------------------------------------------- |
-| `d`           | status=pending                                 | Start the step                                                                  |
-| `d`           | status=running, `awaiting_advance=True`        | Open PsychoPy; start the scan only after its screen shows "waiting for scanner" |
-| `d`           | status=completed                               | Move cursor forward; auto-start next pending step                               |
-| `d`           | status=failed                                  | No-op; press `r` or `i`                                                         |
-| `r`           | cursor step not running, no other step running | Clear files and restart step (confirms on completed)                            |
-| `r`           | cursor step running                            | Stop, clear, restart                                                            |
-| `i`           | any step running                               | Interrupt running step; clear its partial data; mark pending                    |
-| `i`           | cursor step failed, nothing running            | Clear cursor step's partial data; mark pending                                  |
-| `b` / `left`  | any                                            | Move cursor backward                                                            |
-| `n` / `right` | any                                            | Move cursor forward                                                             |
-| `g`           | any                                            | Prompt for step number; jump cursor                                             |
-| `m`           | status=running, `murfi` in components          | Relaunch MURFI; keep data and progress                                          |
-| `p`           | status=running, `psychopy` in components       | Relaunch PsychoPy; keep data and progress                                       |
-| `s`           | any                                            | Return to the session menu (1/2/3/4); prompts before stopping a running step    |
-| `esc`         | any                                            | Quit the app; prompts before stopping a running step                            |
+| Key           | When valid                                     | Action                                                                                                               |
+| ------------- | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `d`           | status=pending                                 | Start the step                                                                                                       |
+| `d`           | status=running, `awaiting_advance=True`        | Open PsychoPy (left monitor, focused); press SPACE through its instructions; start the scan at "waiting for scanner" |
+| `d`           | status=completed                               | Move cursor forward; auto-start next pending step                                                                    |
+| `d`           | status=failed                                  | No-op; press `r` or `i`                                                                                              |
+| `r`           | cursor step not running, no other step running | Clear files and restart step (confirms on completed)                                                                 |
+| `r`           | cursor step running                            | Stop, clear, restart                                                                                                 |
+| `i`           | any step running                               | Interrupt running step; clear its partial data; mark pending                                                         |
+| `i`           | cursor step failed, nothing running            | Clear cursor step's partial data; mark pending                                                                       |
+| `b` / `left`  | any                                            | Move cursor backward                                                                                                 |
+| `n` / `right` | any                                            | Move cursor forward                                                                                                  |
+| `g`           | any                                            | Prompt for step number; jump cursor                                                                                  |
+| `m`           | status=running, `murfi` in components          | Relaunch MURFI; keep data and progress                                                                               |
+| `p`           | status=running, `psychopy` in components       | Relaunch PsychoPy; keep data and progress                                                                            |
+| `s`           | any                                            | Return to the session menu (1/2/3/4); prompts before stopping a running step                                         |
+| `esc`         | any                                            | Quit the app; prompts before stopping a running step                                                                 |
 
 `r` destroys on-disk data for the step. `m` and `p` keep data; they restart one subprocess.
 

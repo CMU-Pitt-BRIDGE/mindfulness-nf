@@ -37,7 +37,7 @@ def test_psychopy_open_without_volumes_says_start_scan() -> None:
         _running(FEEDBACK_1, phase="psychopy", detail_message="PsychoPy running")
     )
     assert light.color is Color.YELLOW
-    assert "start the scan now" in light.message
+    assert "press SPACE through the instructions" in light.message
 
 
 @pytest.mark.parametrize("step", [FEEDBACK_1, REST_1])
@@ -67,3 +67,13 @@ def test_psychopy_crash_is_red() -> None:
     )
     assert light.color is Color.RED
     assert "press P" in (light.detail or "")
+
+
+def test_psychopy_without_focus_tells_operator_to_click_it() -> None:
+    from mindfulness_nf.orchestration.executors.nf_run import PSYCHOPY_NOT_FOCUSED
+
+    light = running_light(
+        _running(FEEDBACK_1, phase="psychopy", detail_message=PSYCHOPY_NOT_FOCUSED)
+    )
+    assert light.color is Color.YELLOW
+    assert "click the participant screen" in light.message

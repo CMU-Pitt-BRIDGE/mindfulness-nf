@@ -91,14 +91,28 @@ def running_light(step: StepState) -> TrafficLight:
             Color.YELLOW,
             f"{name}: press D to open PsychoPy",
             detail=(
-                "Do NOT start the scan yet. Start it once the participant "
-                "screen shows 'waiting for scanner'."
+                "Do NOT start the scan yet. After D, press SPACE through "
+                "PsychoPy's instructions; start the scan when it shows "
+                "'waiting for scanner'."
+            ),
+        )
+
+    if kind is StepKind.NF_RUN and got == 0 and "NOT focused" in detail:
+        return TrafficLight(
+            Color.YELLOW,
+            f"{name}: click the participant screen (left monitor)",
+            detail=(
+                "PsychoPy does not have keyboard focus, so SPACE and the scanner "
+                "trigger would not reach it. Click its window once, then continue."
             ),
         )
 
     if kind in (StepKind.NF_RUN, StepKind.VSEND_SCAN) and got == 0:
         if kind is StepKind.NF_RUN and step.phase == "psychopy":
-            msg = f"{name}: PsychoPy is waiting, start the scan now"
+            msg = (
+                f"{name}: press SPACE through the instructions, then start "
+                "the scan at 'waiting for scanner'"
+            )
         elif kind is StepKind.VSEND_SCAN:
             msg = f"{name}: MURFI is listening, start the scan now"
         else:

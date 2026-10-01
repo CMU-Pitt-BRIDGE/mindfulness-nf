@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from mindfulness_nf.config import PipelineConfig, ScannerConfig
+from mindfulness_nf.orchestration import displays
 from mindfulness_nf.models import TrafficLight
 from mindfulness_nf.quality import assess_data_gap, assess_volume_count
 
@@ -40,6 +41,7 @@ class MurfiProcess:
     process: asyncio.subprocess.Process
     log_path: Path
     xml_name: str
+    placement: asyncio.Task[bool] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +146,12 @@ async def start(
         start_new_session=True,
     )
 
-    return MurfiProcess(process=process, log_path=log_path, xml_name=xml_name)
+    return MurfiProcess(
+        process=process,
+        log_path=log_path,
+        xml_name=xml_name,
+        placement=asyncio.create_task(displays.move_murfi_right()),
+    )
 
 
 async def stop(murfi: MurfiProcess, *, timeout: float = 10.0) -> None:
@@ -152,6 +159,8 @@ async def stop(murfi: MurfiProcess, *, timeout: float = 10.0) -> None:
 
     Always re-raises ``CancelledError`` after cleanup.
     """
+    if murfi.placement is not None:
+        murfi.placement.cancel()
     cancelled = False
     try:
         if murfi.process.returncode is not None:
